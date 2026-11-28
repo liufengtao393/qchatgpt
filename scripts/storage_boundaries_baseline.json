@@ -15,10 +15,6 @@
     "LAYER_IMPORT_VIOLATION": 1
   },
   "src/langbot/pkg/api/http/controller/groups/knowledge/migration.py": {
-    "LAYER_IMPORT_VIOLATION": 1,
-    "RAW_DIALECT_SQL": 1
-  },
-  "src/langbot/pkg/api/http/controller/groups/platform/bots.py": {
     "LAYER_IMPORT_VIOLATION": 1
   },
   "src/langbot/pkg/api/http/controller/groups/plugins.py": {
@@ -27,43 +23,11 @@
   "src/langbot/pkg/api/http/controller/groups/system.py": {
     "LAYER_IMPORT_VIOLATION": 1
   },
-  "src/langbot/pkg/api/http/service/model.py": {
-    "DIALECT_NAME_BRANCH": 1,
-    "STORAGE_DIALECT_IMPORT": 2
-  },
   "src/langbot/pkg/api/http/service/monitoring.py": {
-    "DIALECT_NAME_BRANCH": 3,
-    "DIALECT_SQL_FUNC": 2,
-    "STORAGE_DIALECT_IMPORT": 2
-  },
-  "src/langbot/pkg/api/http/service/monitoring_execution_details.py": {
     "DIALECT_NAME_BRANCH": 1
-  },
-  "src/langbot/pkg/api/http/service/monitoring_traffic.py": {
-    "DIALECT_NAME_BRANCH": 1,
-    "DIALECT_SQL_FUNC": 2
   },
   "src/langbot/pkg/api/http/service/pipeline_migration.py": {
     "DIALECT_NAME_BRANCH": 2
-  },
-  "src/langbot/pkg/box/settings.py": {
-    "DIALECT_NAME_BRANCH": 1,
-    "STORAGE_DIALECT_IMPORT": 2
-  },
-  "src/langbot/pkg/cloud/directory_projection.py": {
-    "DIALECT_NAME_BRANCH": 1,
-    "STORAGE_DIALECT_IMPORT": 2
-  },
-  "src/langbot/pkg/cloud/message_quota.py": {
-    "DIALECT_NAME_BRANCH": 1,
-    "STORAGE_DIALECT_IMPORT": 2
-  },
-  "src/langbot/pkg/command/builtin.py": {
-    "RAW_ENGINE_BYPASS": 1
-  },
-  "src/langbot/pkg/i18n/workspace.py": {
-    "DIALECT_NAME_BRANCH": 1,
-    "STORAGE_DIALECT_IMPORT": 2
   },
   "src/langbot/pkg/persistence/database.py": {
     "LAYER_IMPORT_VIOLATION": 1
@@ -82,30 +46,5 @@
   },
   "src/langbot/pkg/persistence/resource_urls.py": {
     "LAYER_IMPORT_VIOLATION": 1
-  },
-  "src/langbot/pkg/plugin/handler.py": {
-    "DIALECT_NAME_BRANCH": 1,
-    "STORAGE_DIALECT_IMPORT": 2
-  },
-  "src/langbot/pkg/skill/database_repository.py": {
-    "DIALECT_NAME_BRANCH": 2,
-    "STORAGE_DIALECT_IMPORT": 2
-  },
-  "src/langbot/pkg/storage/artifact_publication.py": {
-    "DIALECT_NAME_BRANCH": 1,
-    "STORAGE_DIALECT_IMPORT": 2
-  },
-  "src/langbot/pkg/storage/content.py": {
-    "DIALECT_NAME_BRANCH": 3,
-    "STORAGE_DIALECT_IMPORT": 4
-  },
-  "src/langbot/pkg/storage/migration.py": {
-    "DIALECT_NAME_BRANCH": 1,
-    "STORAGE_DIALECT_IMPORT": 2
-  },
-  "src/langbot/pkg/utils/execution_lease.py": {
-    "DIALECT_NAME_BRANCH": 2,
-    "RAW_DIALECT_SQL": 1,
-    "STORAGE_DIALECT_IMPORT": 2
   }
 }

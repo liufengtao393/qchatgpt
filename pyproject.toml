@@ -256,18 +256,6 @@ dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
 # Legacy dialect-import debt tracked in #3196 (remove entries as files are migrated).
 "src/langbot/pkg/agent/runner/event_log_store.py" = ["TID251"]
 "src/langbot/pkg/agent/runner/persistent_state_store.py" = ["TID251"]
-"src/langbot/pkg/api/http/service/model.py" = ["TID251"]
-"src/langbot/pkg/api/http/service/monitoring.py" = ["TID251"]
-"src/langbot/pkg/box/settings.py" = ["TID251"]
-"src/langbot/pkg/cloud/directory_projection.py" = ["TID251"]
-"src/langbot/pkg/cloud/message_quota.py" = ["TID251"]
-"src/langbot/pkg/i18n/workspace.py" = ["TID251"]
-"src/langbot/pkg/plugin/handler.py" = ["TID251"]
-"src/langbot/pkg/skill/database_repository.py" = ["TID251"]
-"src/langbot/pkg/storage/artifact_publication.py" = ["TID251"]
-"src/langbot/pkg/storage/content.py" = ["TID251"]
-"src/langbot/pkg/storage/migration.py" = ["TID251"]
-"src/langbot/pkg/utils/execution_lease.py" = ["TID251"]
 
 [tool.ruff.format]
 # Like Black, use double quotes for strings.
