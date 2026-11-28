@@ -125,6 +125,73 @@ class ModuleGraphGateTests(unittest.TestCase):
             self.assertEqual(mermaid.returncode, 0)
             self.assertIn('flowchart LR', mermaid.stdout)
 
+    def test_splits_upward_debt_into_shrink_only_legacy_upward_depends_on(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for mod in ('config', 'persistence', 'pipeline'):
+                (root / f'src/langbot/pkg/{mod}').mkdir(parents=True)
+
+            # Upward dependency declared in depends_on must be rejected.
+            bad_upward = self._write_graph(
+                root,
+                {
+                    'config': {'layer': 'foundation', 'depends_on': ['pipeline']},
+                    'persistence': {'layer': 'infrastructure', 'depends_on': ['config']},
+                    'pipeline': {'layer': 'domain', 'depends_on': ['persistence']},
+                },
+            )
+            res = self._run(root, bad_upward)
+            self.assertEqual(res.returncode, 1)
+            self.assertIn('UPWARD_DEPENDENCY_IN_DEPENDS_ON', res.stdout)
+
+            # Non-upward dependency declared in legacy_upward_depends_on must be rejected.
+            bad_legacy = self._write_graph(
+                root,
+                {
+                    'config': {'layer': 'foundation', 'depends_on': []},
+                    'persistence': {
+                        'layer': 'infrastructure',
+                        'depends_on': [],
+                        'legacy_upward_depends_on': ['config'],
+                    },
+                    'pipeline': {'layer': 'domain', 'depends_on': ['persistence']},
+                },
+            )
+            res = self._run(root, bad_legacy)
+            self.assertEqual(res.returncode, 1)
+            self.assertIn('INVALID_LEGACY_UPWARD_EDGE', res.stdout)
+
+            # Active legacy upward edge is allowed while imported, and rendered dashed in Mermaid.
+            ratchet_graph = self._write_graph(
+                root,
+                {
+                    'config': {
+                        'layer': 'foundation',
+                        'depends_on': [],
+                        'legacy_upward_depends_on': ['pipeline'],
+                    },
+                    'persistence': {'layer': 'infrastructure', 'depends_on': ['config']},
+                    'pipeline': {'layer': 'domain', 'depends_on': ['persistence']},
+                },
+            )
+            sample = root / 'src/langbot/pkg/config/sample.py'
+            sample.write_text('from ..pipeline import runner\n', encoding='utf-8')
+            self.assertEqual(self._run(root, ratchet_graph).returncode, 0)
+
+            mermaid = self._run(root, ratchet_graph, '--mermaid')
+            self.assertEqual(mermaid.returncode, 0)
+            self.assertIn('config -.-> pipeline', mermaid.stdout)
+
+            # Once the runtime import is removed, the gate fails so legacy_upward_depends_on shrinks.
+            sample.write_text(
+                'import typing\nif typing.TYPE_CHECKING:\n    from ..pipeline import runner\n',
+                encoding='utf-8',
+            )
+            stale = self._run(root, ratchet_graph)
+            self.assertEqual(stale.returncode, 1)
+            self.assertIn('STALE_LEGACY_UPWARD_EDGE', stale.stdout)
+            self.assertIn('config -> pipeline', stale.stdout)
+
     def test_repo_module_graph_passes(self):
         res = self._run(REPO_ROOT, GRAPH_FILE)
         self.assertEqual(res.returncode, 0, (res.stdout, res.stderr))

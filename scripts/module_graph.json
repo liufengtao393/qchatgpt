@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "description": "Declarative runtime dependency graph and hidden-internal boundaries for all top-level packages under src/langbot/pkg/ (see #3206).",
+  "description": "Declarative runtime dependency graph and hidden-internal boundaries for all top-level packages under src/langbot/pkg/ (see #3206, #3208). `depends_on` permits only same-layer or downward dependencies; `legacy_upward_depends_on` tracks shrink-only historical upward debt.",
   "layers": [
     "foundation",
     "infrastructure",
@@ -16,14 +16,17 @@
     },
     "entity": {
       "layer": "foundation",
-      "depends_on": [
+      "depends_on": [],
+      "legacy_upward_depends_on": [
         "persistence"
       ]
     },
     "i18n": {
       "layer": "foundation",
       "depends_on": [
-        "entity",
+        "entity"
+      ],
+      "legacy_upward_depends_on": [
         "persistence"
       ]
     },
@@ -36,8 +39,10 @@
     "utils": {
       "layer": "foundation",
       "depends_on": [
+        "entity"
+      ],
+      "legacy_upward_depends_on": [
         "core",
-        "entity",
         "persistence",
         "workspace"
       ]
@@ -45,65 +50,77 @@
     "discover": {
       "layer": "infrastructure",
       "depends_on": [
-        "core",
         "utils"
+      ],
+      "legacy_upward_depends_on": [
+        "core"
       ]
     },
     "operation_trace": {
       "layer": "infrastructure",
       "depends_on": [
-        "api",
-        "core",
         "entity",
         "utils"
+      ],
+      "legacy_upward_depends_on": [
+        "api",
+        "core"
       ]
     },
     "persistence": {
       "layer": "infrastructure",
       "depends_on": [
+        "entity",
+        "storage",
+        "utils"
+      ],
+      "legacy_upward_depends_on": [
         "api",
         "cloud",
         "core",
-        "entity",
-        "platform",
-        "storage",
-        "utils"
+        "platform"
       ],
       "private_submodules": [
         "databases",
         "migrations",
         "alembic"
       ],
-      "notes": "Upward runtime deps (api/cloud/core/platform/storage) are legacy debt tracked in #3196 and #3200; private_submodules hide concrete DB drivers and migrations."
+      "notes": "Upward runtime deps (api/cloud/core/platform) are shrink-only legacy debt tracked in #3208; private_submodules hide concrete DB drivers and migrations."
     },
     "storage": {
       "layer": "infrastructure",
       "depends_on": [
-        "api",
-        "core",
         "entity",
         "i18n",
         "persistence",
         "utils"
+      ],
+      "legacy_upward_depends_on": [
+        "api",
+        "core"
       ]
     },
     "telemetry": {
       "layer": "infrastructure",
       "depends_on": [
+        "entity",
+        "utils"
+      ],
+      "legacy_upward_depends_on": [
         "command",
         "core",
-        "entity",
-        "message_policy",
-        "utils"
+        "message_policy"
       ]
     },
     "vector": {
       "layer": "infrastructure",
       "depends_on": [
+        "entity",
+        "utils"
+      ],
+      "legacy_upward_depends_on": [
         "api",
         "core",
-        "entity",
-        "utils",
         "workspace"
       ]
     },
@@ -122,8 +139,6 @@
     "box": {
       "layer": "domain",
       "depends_on": [
-        "agent",
-        "api",
         "cloud",
         "entity",
         "i18n",
@@ -132,6 +147,10 @@
         "storage",
         "telemetry",
         "utils"
+      ],
+      "legacy_upward_depends_on": [
+        "agent",
+        "api"
       ]
     },
     "cloud": {
@@ -142,147 +161,169 @@
         "i18n",
         "notification",
         "persistence",
-        "platform",
         "workspace"
+      ],
+      "legacy_upward_depends_on": [
+        "platform"
       ]
     },
     "message_policy": {
       "layer": "domain",
       "depends_on": [
         "i18n",
-        "pipeline",
-        "platform",
         "telemetry",
         "utils"
+      ],
+      "legacy_upward_depends_on": [
+        "pipeline",
+        "platform"
       ]
     },
     "provider": {
       "layer": "domain",
       "depends_on": [
-        "agent",
-        "api",
         "box",
-        "core",
         "discover",
         "entity",
         "i18n",
         "persistence",
-        "pipeline",
-        "platform",
         "storage",
         "telemetry",
         "utils",
         "workspace"
+      ],
+      "legacy_upward_depends_on": [
+        "agent",
+        "api",
+        "core",
+        "pipeline",
+        "platform"
       ]
     },
     "rag": {
       "layer": "domain",
       "depends_on": [
-        "api",
-        "core",
         "entity",
         "i18n",
         "persistence",
-        "plugin",
         "telemetry",
         "workspace"
+      ],
+      "legacy_upward_depends_on": [
+        "api",
+        "core",
+        "plugin"
       ]
     },
     "skill": {
       "layer": "domain",
       "depends_on": [
-        "api",
-        "core",
         "entity",
         "persistence",
         "utils"
+      ],
+      "legacy_upward_depends_on": [
+        "api",
+        "core"
       ]
     },
     "survey": {
       "layer": "domain",
       "depends_on": [
-        "core",
         "entity",
         "persistence",
         "utils"
+      ],
+      "legacy_upward_depends_on": [
+        "core"
       ]
     },
     "workspace": {
       "layer": "domain",
       "depends_on": [
-        "api",
         "entity",
         "notification",
         "persistence",
         "utils"
+      ],
+      "legacy_upward_depends_on": [
+        "api"
       ]
     },
     "agent": {
       "layer": "orchestration",
       "depends_on": [
-        "api",
         "box",
-        "core",
         "entity",
         "i18n",
         "persistence",
         "pipeline",
-        "platform",
         "provider",
         "storage",
         "telemetry",
         "utils"
+      ],
+      "legacy_upward_depends_on": [
+        "api",
+        "core",
+        "platform"
       ]
     },
     "command": {
       "layer": "orchestration",
       "depends_on": [
         "agent",
-        "api",
-        "core",
         "entity",
         "i18n",
         "persistence",
-        "platform",
         "utils"
+      ],
+      "legacy_upward_depends_on": [
+        "api",
+        "core",
+        "platform"
       ]
     },
     "pipeline": {
       "layer": "orchestration",
       "depends_on": [
         "agent",
-        "api",
         "cloud",
-        "core",
         "entity",
         "i18n",
         "message_policy",
         "persistence",
-        "platform",
         "plugin",
         "provider",
         "telemetry",
         "utils",
         "workspace"
+      ],
+      "legacy_upward_depends_on": [
+        "api",
+        "core",
+        "platform"
       ]
     },
     "plugin": {
       "layer": "orchestration",
       "depends_on": [
         "agent",
-        "api",
         "box",
-        "core",
         "entity",
         "i18n",
         "persistence",
         "pipeline",
-        "platform",
         "provider",
         "storage",
         "telemetry",
         "utils",
         "workspace"
+      ],
+      "legacy_upward_depends_on": [
+        "api",
+        "core",
+        "platform"
       ]
     },
     "api": {
@@ -292,7 +333,6 @@
         "alerts",
         "cloud",
         "command",
-        "core",
         "discover",
         "entity",
         "i18n",
@@ -309,6 +349,9 @@
         "telemetry",
         "utils",
         "workspace"
+      ],
+      "legacy_upward_depends_on": [
+        "core"
       ]
     },
     "platform": {
@@ -319,7 +362,6 @@
         "cloud",
         "command",
         "config",
-        "core",
         "discover",
         "entity",
         "i18n",
@@ -330,6 +372,9 @@
         "telemetry",
         "utils",
         "workspace"
+      ],
+      "legacy_upward_depends_on": [
+        "core"
       ]
     },
     "core": {

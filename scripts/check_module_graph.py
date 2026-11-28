@@ -3,13 +3,17 @@
 Inspired by Tach / architectural fitness functions, this zero-dependency static gate:
 1. Requires every top-level package under ``src/langbot/pkg/`` to be explicitly declared in
    ``scripts/module_graph.json``.
-2. Rejects any runtime cross-package import (outside ``if TYPE_CHECKING:`` and frozen
-   Alembic migrations) that is not permitted in the source module's ``depends_on`` list.
-3. Enforces ``private_submodules`` ("Hide internals"): external modules cannot import
+2. Enforces layer direction: ``depends_on`` may only declare same-layer or downward
+   dependencies; historical upward edges live in shrink-only ``legacy_upward_depends_on``.
+3. Rejects any runtime cross-package import (outside ``if TYPE_CHECKING:`` and frozen
+   Alembic migrations) not permitted by ``depends_on`` or ``legacy_upward_depends_on``,
+   and fails automatically if any ``legacy_upward_depends_on`` edge becomes unused so debt
+   only shrinks.
+4. Enforces ``private_submodules`` ("Hide internals"): external modules cannot import
    hidden internal subpackages (such as ``langbot.pkg.persistence.databases`` or
    ``langbot.pkg.persistence.migrations``) even when depending on the parent package.
-4. Supports ``--strict`` to flag unused declared edges and ``--mermaid`` to export a
-   Mermaid architecture graph.
+5. Supports ``--strict`` to flag unused declared ``depends_on`` edges and ``--mermaid`` to
+   export a Mermaid architecture graph.
 """
 
 from __future__ import annotations
@@ -50,11 +54,15 @@ def load_graph(path: Path) -> dict:
             raise ValueError(f'Module {name!r} spec must be an object')
         if layers and spec.get('layer') not in layers:
             raise ValueError(f'Module {name!r} has unknown layer {spec.get("layer")!r}')
-        for dep in spec.get('depends_on', []):
-            if dep == name:
-                raise ValueError(f'Module {name!r} must not list itself in depends_on')
-            if dep not in modules:
-                raise ValueError(f'Module {name!r} depends_on unknown module {dep!r}')
+        for field in ('depends_on', 'legacy_upward_depends_on'):
+            deps = spec.get(field, [])
+            if not isinstance(deps, list):
+                raise ValueError(f'Module {name!r} field {field!r} must be a list')
+            for dep in deps:
+                if dep == name:
+                    raise ValueError(f'Module {name!r} must not list itself in {field}')
+                if dep not in modules:
+                    raise ValueError(f'Module {name!r} {field} references unknown module {dep!r}')
     return raw
 
 
@@ -106,6 +114,7 @@ def check_repo(
     graph: dict,
 ) -> tuple[list[GraphViolation], dict[str, set[str]], list[str]]:
     modules = graph['modules']
+    layer_rank = {layer: idx for idx, layer in enumerate(graph.get('layers', []))}
     actual_pkgs = discover_packages(root)
     declared_pkgs = set(modules.keys())
 
@@ -131,6 +140,62 @@ def check_repo(
             )
         )
 
+    for mod, spec in sorted(modules.items()):
+        src_layer = spec.get('layer', 'unknown')
+        src_rank = layer_rank.get(src_layer)
+        depends_on = set(spec.get('depends_on', []))
+        legacy_upward = set(spec.get('legacy_upward_depends_on', []))
+
+        for dep in sorted(depends_on):
+            dep_layer = modules[dep].get('layer', 'unknown')
+            dep_rank = layer_rank.get(dep_layer)
+            if src_rank is not None and dep_rank is not None and dep_rank > src_rank:
+                violations.append(
+                    GraphViolation(
+                        path='scripts/module_graph.json',
+                        line=1,
+                        code='UPWARD_DEPENDENCY_IN_DEPENDS_ON',
+                        detail=(
+                            f'`{mod}` ({src_layer}) declares upward dependency `{dep}` ({dep_layer}) '
+                            f'in `depends_on`'
+                        ),
+                        guidance=(
+                            'do not add upward runtime dependencies to `depends_on`; use '
+                            '`if typing.TYPE_CHECKING:` or invert/extract shared contracts'
+                        ),
+                    )
+                )
+
+        for dep in sorted(legacy_upward):
+            dep_layer = modules[dep].get('layer', 'unknown')
+            dep_rank = layer_rank.get(dep_layer)
+            if dep in depends_on:
+                violations.append(
+                    GraphViolation(
+                        path='scripts/module_graph.json',
+                        line=1,
+                        code='INVALID_LEGACY_UPWARD_EDGE',
+                        detail=f'`{mod} -> {dep}` is duplicated in both `depends_on` and `legacy_upward_depends_on`',
+                        guidance=(
+                            'keep same/downward edges only in `depends_on` and historical upward edges '
+                            'only in `legacy_upward_depends_on`'
+                        ),
+                    )
+                )
+            elif src_rank is not None and dep_rank is not None and dep_rank <= src_rank:
+                violations.append(
+                    GraphViolation(
+                        path='scripts/module_graph.json',
+                        line=1,
+                        code='INVALID_LEGACY_UPWARD_EDGE',
+                        detail=(
+                            f'`{mod}` ({src_layer}) -> `{dep}` ({dep_layer}) is not an upward dependency '
+                            f'and must not be listed in `legacy_upward_depends_on`'
+                        ),
+                        guidance='move valid same-layer or downward dependencies to `depends_on`',
+                    )
+                )
+
     observed_edges: dict[str, set[str]] = defaultdict(set)
     pkg_root = root / 'src' / 'langbot' / 'pkg'
     if pkg_root.exists():
@@ -146,7 +211,9 @@ def check_repo(
             src_mod = parts[3]
             if src_mod not in modules:
                 continue
-            allowed_deps = set(modules[src_mod].get('depends_on', []))
+            allowed_deps = set(modules[src_mod].get('depends_on', [])) | set(
+                modules[src_mod].get('legacy_upward_depends_on', [])
+            )
 
             with tokenize.open(path) as handle:
                 source = handle.read()
@@ -173,6 +240,20 @@ def check_repo(
                         seen_on_stmt.add((tgt_mod, None))
                         src_layer = modules[src_mod].get('layer', 'unknown')
                         tgt_layer = modules[tgt_mod].get('layer', 'unknown')
+                        src_rank = layer_rank.get(src_layer)
+                        tgt_rank = layer_rank.get(tgt_layer)
+                        if src_rank is not None and tgt_rank is not None and tgt_rank > src_rank:
+                            guidance = (
+                                'upward runtime dependencies are forbidden; use `if typing.TYPE_CHECKING:` '
+                                'for type-only imports or extract shared contracts to a lower layer '
+                                '(never add new entries to `legacy_upward_depends_on`)'
+                            )
+                        else:
+                            guidance = (
+                                'keep dependencies aligned with the architecture graph, use '
+                                '`if typing.TYPE_CHECKING:` for type-only imports, or explicitly '
+                                'review and update `depends_on` in scripts/module_graph.json'
+                            )
                         violations.append(
                             GraphViolation(
                                 path=rel_path,
@@ -182,11 +263,7 @@ def check_repo(
                                     f'`langbot.pkg.{src_mod}` ({src_layer}) must not depend at runtime '
                                     f'on `langbot.pkg.{tgt_mod}` ({tgt_layer}) via `{target}`'
                                 ),
-                                guidance=(
-                                    'keep dependencies aligned with the architecture graph, use '
-                                    '`if typing.TYPE_CHECKING:` for type-only imports, or explicitly '
-                                    'review and update scripts/module_graph.json'
-                                ),
+                                guidance=guidance,
                             )
                         )
 
@@ -211,6 +288,20 @@ def check_repo(
         for dep in sorted(spec.get('depends_on', [])):
             if dep not in observed_edges.get(mod, set()):
                 unused_edges.append(f'{mod} -> {dep}')
+        for dep in sorted(spec.get('legacy_upward_depends_on', [])):
+            if dep not in observed_edges.get(mod, set()):
+                violations.append(
+                    GraphViolation(
+                        path='scripts/module_graph.json',
+                        line=1,
+                        code='STALE_LEGACY_UPWARD_EDGE',
+                        detail=f'legacy upward dependency `{mod} -> {dep}` is no longer imported at runtime',
+                        guidance=(
+                            'remove it from `legacy_upward_depends_on` in scripts/module_graph.json '
+                            'to ratchet down debt'
+                        ),
+                    )
+                )
 
     violations.sort(key=lambda item: (item.path, item.line, item.code, item.detail))
     return violations, observed_edges, unused_edges
@@ -232,6 +323,8 @@ def render_mermaid(graph: dict) -> str:
     for mod, spec in sorted(graph['modules'].items()):
         for dep in sorted(spec.get('depends_on', [])):
             lines.append(f'  {mod} --> {dep}')
+        for dep in sorted(spec.get('legacy_upward_depends_on', [])):
+            lines.append(f'  {mod} -.-> {dep}')
     return '\n'.join(lines)
 
 
