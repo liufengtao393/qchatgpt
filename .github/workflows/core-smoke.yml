@@ -38,7 +38,7 @@ jobs:
           python-version: '3.12'
       - run: python -m pip install PyYAML==6.0.3
       - name: Check regression tools
-        run: timeout 60s python -m unittest discover -s tools/tests -p 'test_*.py' -v
+        run: timeout 180s python -m unittest discover -s tools/tests -p 'test_*.py' -v
 
   smoke:
     name: Core runtime smoke
@@ -103,6 +103,11 @@ jobs:
           name: core-smoke-${{ github.run_id }}
           path: |
             .qa/core-smoke/gate/gate.json
+            .qa/core-smoke/gate/run-manifest.json
+            .qa/core-smoke/gate/trace-index.json
+            .qa/core-smoke/gate/observations.jsonl
+            .qa/core-smoke/gate/actions.jsonl
+            .qa/core-smoke/gate/**/actions.jsonl
             .qa/core-smoke/gate/resources.jsonl
             .qa/core-smoke/gate/suite.log
             .qa/core-smoke/gate/suite/cases.json

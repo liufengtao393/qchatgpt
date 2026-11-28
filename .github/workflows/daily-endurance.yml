@@ -178,6 +178,11 @@ jobs:
             .qa/daily-workload.txt
             .qa/daily/gate/mixed.json
             .qa/daily/gate/gate.json
+            .qa/daily/gate/run-manifest.json
+            .qa/daily/gate/trace-index.json
+            .qa/daily/gate/observations.jsonl
+            .qa/daily/gate/actions.jsonl
+            .qa/daily/gate/**/actions.jsonl
             .qa/daily/gate/resources.jsonl
             .qa/daily/gate/suite.log
             .qa/daily/gate/suite/summary.json

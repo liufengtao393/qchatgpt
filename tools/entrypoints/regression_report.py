@@ -107,11 +107,19 @@ def summarize(mode, root, sha=None, step_outcome=None):
     coverage = read_json(root / 'gate/suite/coverage.json')
     profile = read_json(root / 'gate/suite/profile.json')
     manifest = read_json(root / 'plugins/manifest.json')
+    run_manifest = read_json(root / 'gate/run-manifest.json')
     errors = list(gate.get('resource_errors', [])) + list(gate.get('coverage_errors', []))
     if gate.get('infrastructure_error'):
         errors.append(f'Preparation or teardown failed: {gate["infrastructure_error"]}')
     if not gate or not suite:
         errors.append('Missing verdict; inspect preparation and service logs.')
+    if run_manifest:
+        completeness = run_manifest.get('completeness', 'missing')
+        if completeness != 'complete':
+            errors.append(f'Run manifest completeness is `{completeness}`, expected `complete`.')
+        interrupted = run_manifest.get('actions', {}).get('interrupted', 0)
+        if interrupted:
+            errors.append(f'Run manifest contains {interrupted} interrupted action record(s).')
     recorded_suite = profile.get('coverage_suite')
     if 'api_fixed_only' in gate or 'api_seed' in gate:
         recorded_suite = 'api'
@@ -173,6 +181,15 @@ def summarize(mode, root, sha=None, step_outcome=None):
     if not passed and suite.get('outcome') == 'INCOMPLETE' and not outer_failed and mode == 'daily':
         outcome = 'INCOMPLETE'
     print(f'{label}: {outcome}\n')
+    trace_summary = run_manifest.get('trace_index', {})
+    interrupted = run_manifest.get('actions', {}).get('interrupted', 0)
+    print(
+        'manifest completeness: '
+        f'`{run_manifest.get("completeness", "missing")}`; '
+        f'interrupted: `{interrupted}`; '
+        f'unindexed_records: `{trace_summary.get("unindexed_records", "not reported")}`; '
+        f'global_observations: `{trace_summary.get("global_observations", "not reported")}`.\n'
+    )
     if sha:
         print(f'Core: `{sha}`.\n')
     if mode == 'daily':

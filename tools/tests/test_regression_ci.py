@@ -339,6 +339,34 @@ class DailySummaryTest(unittest.TestCase):
                 if not passed:
                     self.assertIn('FAIL / incomplete', text)
 
+    def test_manifest_incompleteness_and_interrupted_actions_fail_report(self):
+        for manifest, expected in (
+            (
+                {'completeness': 'incomplete', 'trace_index': {'unindexed_records': 2, 'global_observations': 1}},
+                'incomplete',
+            ),
+            (
+                {
+                    'completeness': 'complete',
+                    'actions': {'interrupted': 1},
+                    'trace_index': {'unindexed_records': 0, 'global_observations': 3},
+                },
+                'interrupted action',
+            ),
+        ):
+            with self.subTest(manifest=manifest), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / 'gate/suite').mkdir(parents=True)
+                (root / 'gate/gate.json').write_text(json.dumps({'passed': True}))
+                (root / 'gate/suite/summary.json').write_text(json.dumps({'passed': True}))
+                (root / 'gate/run-manifest.json').write_text(json.dumps(manifest))
+                result = run_report('core-smoke', root)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn('manifest completeness:', result.stdout)
+                self.assertIn('unindexed_records:', result.stdout)
+                self.assertIn('global_observations:', result.stdout)
+                self.assertIn(expected, result.stdout)
+
     def test_report_rejects_a_different_recorded_suite(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
