@@ -14,7 +14,6 @@ import typing
 
 import sqlalchemy
 from sqlalchemy import event
-import aiosqlite
 
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession
 
@@ -33,6 +32,7 @@ SQLITE_RETRY_MAX_DELAY_SECONDS = 0.5
 WRITE_RETRY_MAX_ATTEMPTS = SQLITE_RETRY_MAX_ATTEMPTS
 WRITE_RETRY_BASE_DELAY_SECONDS = SQLITE_RETRY_BASE_DELAY_SECONDS
 WRITE_RETRY_MAX_DELAY_SECONDS = SQLITE_RETRY_MAX_DELAY_SECONDS
+WRITE_RETRY_DEFAULT_BUDGET_SECONDS = SQLITE_RETRY_DEFAULT_BUDGET_SECONDS
 
 _persistence_write_deadline: ContextVar[float | None] = ContextVar('_persistence_write_deadline', default=None)
 
@@ -234,7 +234,7 @@ async def _invalidate_connection(conn: AsyncConnection) -> None:
 
 async def _restore_or_invalidate_busy_timeout(
     conn: AsyncConnection,
-    driver_conn: aiosqlite.Connection,
+    driver_conn: typing.Any,
     orig_ms: int,
 ) -> None:
     try:
@@ -262,6 +262,8 @@ async def sqlite_attempt_timeout(
     if engine.dialect.name != 'sqlite':
         yield
         return
+    import aiosqlite
+
     effective_max_attempt = (
         SQLITE_RETRY_ATTEMPT_TIMEOUT_SECONDS if max_attempt_seconds is None else float(max_attempt_seconds)
     )
@@ -411,18 +413,15 @@ async def run_write_tx(
                 async with sqlite_attempt_timeout(session, engine, attempt_remaining):
                     result = await operation(session)
                     if session.in_transaction():
-                        await session.flush()
+                        await commit_write(session)
             else:
                 result = await operation(session)
                 if session.in_transaction():
-                    await session.flush()
-            if session.in_transaction():
-                await commit_write(session)
+                    await commit_write(session)
             return result
 
     if engine.dialect.name != 'sqlite':
         return await _run_non_sqlite_write_tx(
-            engine,
             _attempt,
             retry_on=retry_on,
             budget_seconds=budget_seconds,
@@ -444,7 +443,6 @@ async def run_write_tx(
 
 
 async def _run_non_sqlite_write_tx(
-    engine: AsyncEngine,
     operation: typing.Callable[[float], typing.Awaitable[_T]],
     *,
     retry_on: typing.Callable[[BaseException], bool] | None,
@@ -455,13 +453,15 @@ async def _run_non_sqlite_write_tx(
 ) -> _T:
     """Run the common transaction lifecycle without SQLite admission rules."""
     loop = asyncio.get_running_loop()
-    deadline = loop.time() + max(0.0, float(30.0 if budget_seconds is None else budget_seconds))
+    deadline = loop.time() + max(
+        0.0, float(WRITE_RETRY_DEFAULT_BUDGET_SECONDS if budget_seconds is None else budget_seconds)
+    )
     context_deadline = _persistence_write_deadline.get()
     if context_deadline is not None:
         deadline = min(deadline, float(context_deadline))
-    attempts = max(1, int(8 if max_attempts is None else max_attempts))
-    base_delay = max(0.0, float(0.02 if base_delay_seconds is None else base_delay_seconds))
-    max_delay = max(0.0, float(0.5 if max_delay_seconds is None else max_delay_seconds))
+    attempts = max(1, int(WRITE_RETRY_MAX_ATTEMPTS if max_attempts is None else max_attempts))
+    base_delay = max(0.0, float(WRITE_RETRY_BASE_DELAY_SECONDS if base_delay_seconds is None else base_delay_seconds))
+    max_delay = max(0.0, float(WRITE_RETRY_MAX_DELAY_SECONDS if max_delay_seconds is None else max_delay_seconds))
     attempt = 0
     while True:
         try:

@@ -2,10 +2,22 @@
 
 from __future__ import annotations
 
+import ast
+from pathlib import Path
+
 import sqlalchemy
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from langbot.pkg.persistence.write_admission import run_write_tx
+
+
+def test_write_admission_does_not_import_aiosqlite_at_module_scope():
+    source = Path(__file__).parents[3] / 'src/langbot/pkg/persistence/write_admission.py'
+    tree = ast.parse(source.read_text())
+    imports = [node for node in tree.body if isinstance(node, (ast.Import, ast.ImportFrom))]
+    assert not any(
+        alias.name == 'aiosqlite' for node in imports for alias in (node.names if isinstance(node, ast.Import) else [])
+    )
 
 
 async def _create_table(engine):

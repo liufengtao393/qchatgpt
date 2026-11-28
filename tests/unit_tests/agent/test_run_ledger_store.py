@@ -514,6 +514,20 @@ async def test_retry_resume_and_cancel_ack_persist_lifecycle_metadata(store):
 
 
 @pytest.mark.asyncio
+async def test_cancel_ack_admin_audit_is_atomic(store):
+    await store.create_run(run_id='cancel-audit', event_id=None, binding_id=None, runner_id='runner')
+
+    await store.acknowledge_cancel(
+        run_id='cancel-audit',
+        reason='cleanup complete',
+        admin_audit={'permission': 'agent_run:admin', 'actor_id': 'admin'},
+    )
+
+    events, *_ = await store.page_run_events(run_id='cancel-audit')
+    assert [event['type'] for event in events] == ['run.cancel_ack', 'admin.run_cancel_ack']
+
+
+@pytest.mark.asyncio
 async def test_cancel_ack_is_monotonic_and_concurrent_across_stores(store, db_engine):
     run_id = 'cancel-ack'
     await store.create_run(run_id=run_id, event_id=None, binding_id=None, runner_id='runner', queue_name='external')
@@ -1014,6 +1028,7 @@ async def test_explicit_sequence_duplicate_replay_and_race_return_winner_without
         calls['n'] += 1
         if calls['n'] == 1:
             await real_append(session, **kwargs)
+            await session.commit()
             raise sqlalchemy.exc.IntegrityError(
                 'INSERT INTO agent_run_event',
                 {},

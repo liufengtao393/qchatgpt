@@ -54,7 +54,12 @@ class AgentRunJournal:
             with persistence_write_deadline(None):
                 yield
             return
-        remaining = max(0.0, float(deadline_at) - time.time())
+        try:
+            remaining = max(0.0, float(deadline_at) - time.time())
+        except (TypeError, ValueError):
+            with persistence_write_deadline(None):
+                yield
+            return
         with persistence_write_deadline(loop.time() + remaining):
             yield
 
@@ -203,6 +208,7 @@ class AgentRunJournal:
         sequence: int | None,
         source: str = 'runner',
         metadata: dict[str, typing.Any] | None = None,
+        context: typing.Mapping[str, typing.Any] | None = None,
     ) -> dict[str, typing.Any]:
         """Persist one RunnerResult in the run ledger."""
         usage = result_dict.get('usage')
@@ -217,7 +223,7 @@ class AgentRunJournal:
         if MediaCache.has_inline_images(metadata):
             metadata = MediaCache.redact_inline_images(metadata)
         terminal = str(result_dict.get('type') or '') in {'run.completed', 'run.failed', 'run.cancelled'}
-        with self.write_deadline(terminal=terminal):
+        with self.write_deadline(context, terminal=terminal):
             return await self._get_run_ledger_store().append_event(
                 run_id=run_id,
                 sequence=sequence,

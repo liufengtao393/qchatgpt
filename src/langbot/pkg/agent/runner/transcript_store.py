@@ -308,7 +308,8 @@ class TranscriptStore:
             thread_id,
             True,
         )
-        async with self._session_factory() as session, session.begin():
+
+        async def _write(session: AsyncSession):
             user = (
                 await session.scalars(scoped.where(Transcript.role == 'user').order_by(Transcript.seq.desc()).limit(1))
             ).first()
@@ -328,6 +329,13 @@ class TranscriptStore:
             for row in rows:
                 await session.delete(row)
             return message
+
+        return await run_write_tx(
+            self.engine,
+            _write,
+            session_factory=self._session_factory,
+            slot_operation='ledger',
+        )
 
     async def has_history_before(
         self,

@@ -604,6 +604,7 @@ class AgentRunOrchestrator:
                             result_dict=result_dict,
                             run_id=run_id,
                             sequence=sequence_int,
+                            context=context,
                         )
                         journal_ms = (time.monotonic() - journal_started) * 1000
 
@@ -797,6 +798,7 @@ class AgentRunOrchestrator:
                                 run_id=run_id,
                                 sequence=None,
                                 source='host',
+                                context=context,
                             )
                             cancelled_result['sequence'] = cancelled_event['sequence']
                             if result_observer is not None:
