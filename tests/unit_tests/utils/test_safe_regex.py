@@ -31,6 +31,31 @@ async def test_matches_any_runs_off_event_loop_and_preserves_workspace_scope(mon
 
 
 @pytest.mark.asyncio
+async def test_empty_patterns_short_circuit_without_thread_dispatch(monkeypatch):
+    def forbid_to_thread(*_args, **_kwargs):
+        raise AssertionError('empty pattern lists must not dispatch to asyncio.to_thread')
+
+    monkeypatch.setattr(safe_regex.asyncio, 'to_thread', forbid_to_thread)
+
+    assert await safe_regex.matches_any([], 'hello world') is False
+    assert await safe_regex.mask_patterns([], 'hello world', mask='*', mask_word='') == (False, 'hello world')
+
+    with pytest.raises(safe_regex.SafeRegexLimitError):
+        await safe_regex.matches_any([], 'a' * (safe_regex.MAX_INPUT_CHARS + 1))
+
+    with pytest.raises(ValueError, match='Unsupported safe regex mode'):
+        await safe_regex.matches_any([], 'hello', mode='invalid')
+
+    with pytest.raises(safe_regex.SafeRegexLimitError):
+        await safe_regex.mask_patterns(
+            [],
+            'a' * safe_regex.MAX_INPUT_CHARS,
+            mask='0123456789',
+            mask_word='',
+        )
+
+
+@pytest.mark.asyncio
 async def test_matches_any_interrupts_catastrophic_backtracking():
     with pytest.raises(safe_regex.SafeRegexTimeoutError):
         await safe_regex.matches_any(

@@ -285,8 +285,8 @@ async def test_full_default_pipeline_reduces_binding_checks_single_turn(tmp_path
         assert adapter.reply_message.await_count == 1
         assert not query.variables.get('_monitoring_has_error')
         # Baseline on master before #2709 was 31 binding checks (32 SQL SELECTs).
-        assert len(harness.binding_calls) == 13
-        assert len(harness.selects) == 14
+        assert len(harness.binding_calls) == 12
+        assert len(harness.selects) == 13
     finally:
         await harness.engine.dispose()
 
@@ -311,8 +311,8 @@ async def test_full_default_pipeline_reduces_binding_checks_streaming_chunks(tmp
         assert adapter.reply_message_chunk.await_count == 5
         assert not query.variables.get('_monitoring_has_error')
         # Baseline on master before #2709 was 75 binding checks (76 SQL SELECTs).
-        assert len(harness.binding_calls) == 25
-        assert len(harness.selects) == 26
+        assert len(harness.binding_calls) == 24
+        assert len(harness.selects) == 25
     finally:
         await harness.engine.dispose()
 

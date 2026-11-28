@@ -108,6 +108,17 @@ async def matches_any(
 
     if timeout_seconds <= 0:
         raise ValueError('timeout_seconds must be positive')
+    if len(patterns) == 0:
+        # Avoid thread-pool dispatch for empty pattern lists; validation is O(1)
+        # and skipping asyncio.to_thread keeps suspension behavior deterministic
+        # across Python 3.11-3.14 (where 3.13+ _chain_future can resolve a fast
+        # executor future synchronously on the event-loop thread).
+        return _matches_any_sync(
+            patterns,
+            value,
+            mode=mode,
+            timeout_seconds=timeout_seconds,
+        )
     return await asyncio.to_thread(
         _matches_any_sync,
         patterns,
@@ -178,6 +189,15 @@ async def mask_patterns(
 
     if timeout_seconds <= 0:
         raise ValueError('timeout_seconds must be positive')
+    if len(patterns) == 0:
+        return _mask_patterns_sync(
+            patterns,
+            value,
+            mask=mask,
+            mask_word=mask_word,
+            timeout_seconds=timeout_seconds,
+            max_pattern_count=max_pattern_count,
+        )
     return await asyncio.to_thread(
         _mask_patterns_sync,
         patterns,
