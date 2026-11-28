@@ -199,6 +199,19 @@ def verify_wire(suite, row, receipts):
     return {'requests': len(matched), 'history_isolated': True}
 
 
+def verify_blackbox_replies(receipts, expected_count):
+    require(len(receipts) == expected_count, 'Missing parallel HTTP receipts for blackbox reply isolation')
+    require(
+        all(
+            receipt.get('assertions', {}).get('response_identity') == 'passed'
+            and receipt.get('assertions', {}).get('exact_reply') == 'passed'
+            for receipt in receipts
+        ),
+        'Concurrent HTTP replies failed identity or exact-output isolation',
+    )
+    return {'receipts': len(receipts), 'isolated': True}
+
+
 def parallel_history(suite, row, bots):
     lanes = [lane(suite, *bot) for bot in bots]
     with ThreadPoolExecutor(max_workers=2) as pool:
@@ -218,8 +231,18 @@ def parallel_history(suite, row, bots):
                 merge_receipts(row, receipts)
             if errors:
                 row['request_errors'] = [str(error) for error in errors]
+                if any(
+                    receipt.get('assertions', {}).get(key) == 'failed'
+                    for receipt in receipts
+                    for key in ('response_identity', 'exact_reply')
+                ):
+                    try:
+                        checked(row, 'blackbox_reply_isolation', lambda: verify_blackbox_replies(receipts, 2))
+                    except ValueError:
+                        pass
                 raise errors[0]
             checked(row, f'overlap_turn_{number}', lambda: overlapping([receipt['interval'] for receipt in receipts]))
+    checked(row, 'blackbox_reply_isolation', lambda: verify_blackbox_replies(row['requests'], 4))
     row['wire'] = checked(row, 'wire_identity_history_once', lambda: verify_wire(suite, row, row['requests']))
 
 
@@ -265,6 +288,7 @@ def cancel_neighbor(suite, row, bot):
                 finally:
                     merge_receipts(row, [receipt])
         require(future is not None, 'Cancellation never reached its active execution checkpoint')
+    checked(row, 'blackbox_neighbor_reply', lambda: verify_blackbox_replies([receipt], 1))
     cancelled = next(run for run in row['scenario_runs'] if run['expected_status'] == 'cancelled')
     with closing(ledger(suite)) as db:
         interval = dict(

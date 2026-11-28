@@ -177,13 +177,33 @@
     },
     {"id": "workspace.read_isolation",
      "area": "workspace", "kind": "blackbox", "priority": "P0",
-     "description": "One Workspace cannot read another Workspace resource",
-     "bindings": []
+     "description": "Foreign Workspace selectors cannot read another Workspace's resources or metadata",
+     "bindings": [{"profile": "scenarios", "case": "workspace_isolation", "checks": ["workspace_read_denied", "workspace_isolation_cleanup"]}],
+     "routes": ["GET /api/v1/pipelines", "GET /api/v1/pipelines/<pipeline_uuid>", "GET /api/v1/workspaces/current", "GET /api/v1/workspaces/<workspace_uuid>"]
     },
     {"id": "workspace.write_isolation",
      "area": "workspace", "kind": "blackbox", "priority": "P0",
-     "description": "One Workspace cannot change another Workspace resource",
-     "bindings": []
+     "description": "Foreign Workspace selectors cannot create, mutate, or delete another Workspace's resources",
+     "bindings": [{"profile": "scenarios", "case": "workspace_isolation", "checks": ["workspace_write_denied", "workspace_state_preserved", "workspace_isolation_cleanup"]}],
+     "routes": ["POST /api/v1/pipelines", "PUT /api/v1/pipelines/<pipeline_uuid>", "DELETE /api/v1/pipelines/<pipeline_uuid>"]
+    },
+    {"id": "workspace.config_isolation",
+     "area": "workspace", "kind": "blackbox", "priority": "P0",
+     "description": "Foreign Workspace selectors cannot read or overwrite Workspace configuration settings",
+     "bindings": [{"profile": "scenarios", "case": "workspace_isolation", "checks": ["workspace_config_read_denied", "workspace_config_write_denied", "workspace_config_preserved", "workspace_isolation_cleanup"]}],
+     "routes": ["GET /api/v1/workspaces/current/language", "PUT /api/v1/workspaces/current/language"]
+    },
+    {"id": "workspace.selector_binding",
+     "area": "workspace", "kind": "blackbox", "priority": "P0",
+     "description": "API-key credentials ignore spoofed X-Workspace-Id headers and stay pinned to their owning Workspace",
+     "bindings": [{"profile": "scenarios", "case": "workspace_isolation", "checks": ["workspace_key_pinned", "workspace_isolation_cleanup"]}],
+     "routes": ["GET /api/v1/system/context", "GET /api/v1/workspaces/current/language", "PUT /api/v1/workspaces/current/language"]
+    },
+    {"id": "workspace.artifact_isolation",
+     "area": "workspace", "kind": "blackbox", "priority": "P0",
+     "description": "Foreign Workspace selectors and other principals cannot read, download, retain, or delete owned Artifacts",
+     "bindings": [{"profile": "scenarios", "case": "workspace_isolation", "checks": ["workspace_artifact_read_denied", "workspace_artifact_write_denied", "principal_artifact_isolated", "workspace_isolation_cleanup"]}],
+     "routes": ["GET /api/v1/artifacts/<artifact_id>", "GET /api/v1/artifacts/<artifact_id>/content", "POST /api/v1/artifacts/<artifact_id>/retain", "DELETE /api/v1/artifacts/<artifact_id>"]
     },
     {"id": "execution.cancel_cleanup",
      "area": "execution", "kind": "blackbox", "priority": "P0",
@@ -205,10 +225,45 @@
      "description": "A runtime restart produces a known outcome and subsequent execution works",
      "bindings": [{"profile": "scenarios", "case": "runtime_restart_recovery", "checks": ["process_replaced", "no_false_success", "interrupted_terminal", "response_after_restart"]}]
     },
+    {"id": "runtime.restart_preserves_state",
+     "area": "runtime", "kind": "blackbox", "priority": "P0",
+     "description": "After an owned Plugin Runtime restart and reconnect, configuration, conversation history, retrieval, and monitoring readback remain intact",
+     "bindings": [{"profile": "state", "case": "durable_state_lifecycle", "checks": ["initial_runtime_process_replaced", "after_runtime_configuration", "after_runtime_chat_history", "after_runtime_monitoring_readback", "historical_after_runtime_monitoring_readback", "after_runtime_retrievable"]}]
+    },
+    {"id": "runtime.box_session_recovery",
+     "area": "runtime", "kind": "blackbox", "priority": "P0",
+     "description": "Box Runtime halts interrupted executions, returns the session to idle, and completes follow-up tool runs",
+     "bindings": [{"profile": "scenarios", "case": "execution.cancel_cleanup", "checks": ["exec_active", "exec_stopped", "no_late_side_effect", "box_idle"]}, {"profile": "scenarios", "case": "execution.timeout_cleanup", "checks": ["exec_active", "exec_stopped", "no_late_side_effect", "box_idle"]}],
+     "routes": ["GET /api/v1/box/sessions"]
+    },
+    {"id": "runtime.connectivity_readiness",
+     "area": "runtime", "kind": "blackbox", "priority": "P0",
+     "description": "Plugin Runtime ping, Box Runtime backend status, and required plugin initialization report healthy readiness through public APIs",
+     "bindings": [{"profile": "scenarios", "case": "runtime_connectivity_readiness", "checks": ["runtime_plugin_ping", "runtime_box_ready", "runtime_plugins_initialized"]}],
+     "routes": ["GET /api/v1/system/status/plugin-system", "GET /api/v1/box/runtime-status", "GET /api/v1/box/status", "GET /api/v1/plugins"]
+    },
     {"id": "storage.restart_history",
-     "area": "storage", "kind": "blackbox", "priority": "P1",
+     "area": "storage", "kind": "blackbox", "priority": "P0",
      "description": "Conversation history remains usable across a Core restart",
      "bindings": [{"profile": "scenarios", "case": "core_restart_history", "checks": ["before_restart", "process_replaced", "history_after_restart"]}]
+    },
+    {"id": "storage.artifact_roundtrip",
+     "area": "storage", "kind": "blackbox", "priority": "P0",
+     "description": "Uploaded Artifact preserves exact bytes, SHA-256 digest, metadata, security headers, max_bytes guard, and auth enforcement",
+     "bindings": [{"profile": "scenarios", "case": "artifact_storage_lifecycle", "checks": ["artifact_upload", "artifact_metadata_readback", "artifact_content_roundtrip", "artifact_max_bytes_guard", "artifact_unauthenticated_denied"]}],
+     "routes": ["POST /api/v1/artifacts", "GET /api/v1/artifacts/<artifact_id>", "GET /api/v1/artifacts/<artifact_id>/content"]
+    },
+    {"id": "storage.artifact_retain_delete",
+     "area": "storage", "kind": "blackbox", "priority": "P0",
+     "description": "Retained Artifact resists premature deletion (409) until released, and deletion removes metadata and content (404)",
+     "bindings": [{"profile": "scenarios", "case": "artifact_storage_lifecycle", "checks": ["artifact_retain_persistent", "artifact_delete_blocked_while_retained", "artifact_release_temporary", "artifact_deleted_unavailable", "artifact_cleanup"]}],
+     "routes": ["POST /api/v1/artifacts/<artifact_id>/retain", "POST /api/v1/artifacts/<artifact_id>/release", "DELETE /api/v1/artifacts/<artifact_id>"]
+    },
+    {"id": "storage.skill_content_cas",
+     "area": "storage", "kind": "blackbox", "priority": "P0",
+     "description": "Skill content publication preserves UTF-8 bytes and revision CAS conflict protection (409) until deleted",
+     "bindings": [{"profile": "api", "case": "fixed_api_skills", "checks": ["skill_file_published", "skill_file_readback", "skill_stale_file_after_write_status", "skill_stale_file_after_write_content_preserved", "skill_stale_file_after_write_revision_preserved", "skill_deleted"]}, {"profile": "api", "case": "shuffled_api_skills", "checks": ["skill_file_published", "skill_file_readback", "skill_stale_file_after_write_status", "skill_stale_file_after_write_content_preserved", "skill_stale_file_after_write_revision_preserved", "skill_deleted"]}],
+     "routes": ["PUT /api/v1/skills/<skill_name>/files/<path:path>", "GET /api/v1/skills/<skill_name>/files/<path:path>", "DELETE /api/v1/skills/<skill_name>"]
     },
     {"id": "model.stream_disconnect",
      "area": "model", "kind": "blackbox", "priority": "P1",
@@ -279,9 +334,51 @@
      "routes": ["DELETE /api/v1/plugins/<author>/<plugin_name>"]
     },
     {"id": "agent.direct_execution",
-     "area": "agent", "kind": "blackbox", "priority": "P1",
-     "description": "Standalone Agent entrypoint completes through the public API",
-     "bindings": [{"profile": "scenarios", "case": "agent_direct_execution", "checks": ["agent_response", "agent_terminal", "agent_events", "agent_cleanup"]}]
+     "area": "agent", "kind": "blackbox", "priority": "P0",
+     "description": "Standalone Agent entrypoint completes through the public API with terminal run status and completion event",
+     "bindings": [{"profile": "scenarios", "case": "agent_direct_execution", "checks": ["agent_response", "agent_terminal", "agent_events", "agent_cleanup"]}],
+     "routes": ["POST /api/v1/agents", "POST /api/v1/agents/<agent_uuid>/debug", "GET /api/v1/agents/<agent_uuid>/runs", "GET /api/v1/agents/<agent_uuid>/runs/<run_id>/events", "DELETE /api/v1/agents/<agent_uuid>"]
+    },
+    {"id": "agent.cancel_terminal_consistency",
+     "area": "agent", "kind": "blackbox", "priority": "P0",
+     "description": "Cancelling an active Agent debug stream reaches cancelled terminal status, stops active work, and leaves the Agent usable",
+     "bindings": [{"profile": "scenarios", "case": "execution.cancel_cleanup", "checks": ["run_status", "exec_active", "exec_stopped", "no_late_side_effect", "box_idle"]}],
+     "routes": ["POST /api/v1/agents/<agent_uuid>/debug/stream", "GET /api/v1/agents/<agent_uuid>/runs", "GET /api/v1/agents/<agent_uuid>/runs/<run_id>/events"]
+    },
+    {"id": "agent.timeout_terminal_consistency",
+     "area": "agent", "kind": "blackbox", "priority": "P0",
+     "description": "An Agent debug stream hitting its deadline terminates as timeout, halts active execution, and allows a follow-up run",
+     "bindings": [{"profile": "scenarios", "case": "execution.timeout_cleanup", "checks": ["run_status", "exec_active", "exec_stopped", "no_late_side_effect", "box_idle"]}],
+     "routes": ["POST /api/v1/agents/<agent_uuid>/debug/stream", "GET /api/v1/agents/<agent_uuid>/runs", "GET /api/v1/agents/<agent_uuid>/runs/<run_id>/events"]
+    },
+    {"id": "agent.failure_terminal_recovery",
+     "area": "agent", "kind": "blackbox", "priority": "P0",
+     "description": "An Agent run whose model stream disconnects or exhausts fallbacks terminates as failed and recovers on the next healthy run",
+     "bindings": [{"profile": "scenarios", "case": "model.stream_disconnect", "checks": ["run_status", "fault_injected", "no_fallback_after_partial", "recovered"]}, {"profile": "scenarios", "case": "model.exhausted_fallback", "checks": ["run_status", "fallback_exhausted", "recovered"]}],
+     "routes": ["POST /api/v1/agents/<agent_uuid>/debug/stream", "PUT /api/v1/agents/<agent_uuid>", "GET /api/v1/agents/<agent_uuid>/runs"]
+    },
+    {"id": "persistence.config_survives_restart",
+     "area": "persistence", "kind": "blackbox", "priority": "P0",
+     "description": "Created and updated Pipeline configuration persists intact across owned Runtime and Core restarts",
+     "bindings": [{"profile": "state", "case": "durable_state_lifecycle", "checks": ["created_configuration", "initial_runtime_process_replaced", "after_runtime_configuration", "initial_core_process_replaced", "after_core_configuration", "updated_configuration", "updated_core_process_replaced", "persisted_update_configuration"]}],
+     "routes": ["GET /api/v1/pipelines/<pipeline_uuid>", "PUT /api/v1/pipelines/<pipeline_uuid>"]
+    },
+    {"id": "persistence.run_ledger_survives_restart",
+     "area": "persistence", "kind": "blackbox", "priority": "P0",
+     "description": "Completed AgentRun ledger records and conversation linkage remain queryable via monitoring API across Runtime and Core restarts",
+     "bindings": [{"profile": "state", "case": "durable_state_lifecycle", "checks": ["created_monitoring_readback", "after_runtime_monitoring_readback", "historical_after_runtime_monitoring_readback", "after_core_monitoring_readback", "historical_after_core_monitoring_readback", "updated_monitoring_readback", "persisted_update_monitoring_readback", "historical_updated_after_core_monitoring_readback"]}],
+     "routes": ["GET /api/v1/monitoring/executions/<source>/<execution_id>"]
+    },
+    {"id": "persistence.conversation_survives_restart",
+     "area": "persistence", "kind": "blackbox", "priority": "P0",
+     "description": "Persisted conversation history survives owned Core and Runtime restarts and continues coherently across model updates",
+     "bindings": [{"profile": "scenarios", "case": "core_restart_history", "checks": ["before_restart", "process_replaced", "history_after_restart"]}, {"profile": "state", "case": "durable_state_lifecycle", "checks": ["created_chat_history", "after_runtime_chat_history", "after_core_chat_history", "updated_chat_history", "persisted_update_chat_history"]}]
+    },
+    {"id": "persistence.knowledge_index_durability",
+     "area": "persistence", "kind": "blackbox", "priority": "P0",
+     "description": "Ingested knowledge documents survive Runtime and Core restarts, and replacement/deletion persistently removes obsolete index entries",
+     "bindings": [{"profile": "state", "case": "durable_state_lifecycle", "checks": ["original_ingested", "control_ingested", "created_retrievable", "after_runtime_retrievable", "after_core_retrievable", "updated_retrievable", "updated_obsolete_absent", "persisted_update_retrievable", "persisted_update_obsolete_absent", "documents_deleted", "deleted_retrieval_empty"]}],
+     "routes": ["GET /api/v1/knowledge/bases/<knowledge_base_uuid>/files", "DELETE /api/v1/knowledge/bases/<knowledge_base_uuid>/files/<file_id>", "POST /api/v1/knowledge/bases/<knowledge_base_uuid>/retrieve"]
     },
     {"id": "persistence.postgres_parity",
      "area": "persistence", "kind": "blackbox", "priority": "P1",
@@ -477,6 +574,11 @@
      "description": "Monitoring identifies the exact completed runs for the same conversation, including historical runs after Core and Runtime restarts",
      "bindings": [{"profile": "state", "case": "durable_state_lifecycle", "checks": ["created_monitoring_readback", "after_runtime_monitoring_readback", "historical_after_runtime_monitoring_readback", "after_core_monitoring_readback", "historical_after_core_monitoring_readback", "updated_monitoring_readback", "persisted_update_monitoring_readback", "historical_updated_after_core_monitoring_readback"]}]
     },
+    {"id": "isolation.concurrent_same_pipeline_reply", "area": "isolation", "kind": "blackbox", "priority": "P0", "description": "Concurrent sessions in one Pipeline return only their own exact HTTP reply tokens across turns", "bindings": [{"profile": "isolation", "case": "isolation.same_pipeline", "checks": ["blackbox_reply_isolation"]}]},
+    {"id": "isolation.concurrent_cross_pipeline_reply", "area": "isolation", "kind": "blackbox", "priority": "P0", "description": "Concurrent Pipelines deliver only their own model outputs and reply tokens without cross-talk", "bindings": [{"profile": "isolation", "case": "isolation.cross_pipeline", "checks": ["blackbox_reply_isolation"]}]},
+    {"id": "isolation.cancel_preserves_neighbor_reply", "area": "isolation", "kind": "blackbox", "priority": "P0", "description": "Cancelling one active tool run preserves a concurrent neighbor's exact HTTP reply without late side effects", "bindings": [{"profile": "isolation", "case": "isolation.cancel_neighbor", "checks": ["blackbox_neighbor_reply", "no_late_side_effect", "box_idle"]}]},
+    {"id": "isolation.principal_artifact_boundary", "area": "isolation", "kind": "blackbox", "priority": "P0", "description": "A distinct API-key principal within the same Workspace cannot read, download, or delete another principal's Artifacts", "bindings": [{"profile": "scenarios", "case": "workspace_isolation", "checks": ["principal_artifact_isolated", "workspace_isolation_cleanup"]}], "routes": ["GET /api/v1/artifacts/<artifact_id>", "GET /api/v1/artifacts/<artifact_id>/content", "DELETE /api/v1/artifacts/<artifact_id>"]},
+    {"id": "isolation.readonly_key_boundary", "area": "isolation", "kind": "blackbox", "priority": "P0", "description": "A read-only Workspace API key cannot mutate resources or retrieve secret material", "bindings": [{"profile": "api", "case": "fixed_api_credentials", "checks": ["api_chain", "readonly_denial_preserves_state", "key_metadata_redacted"]}, {"profile": "api", "case": "shuffled_api_credentials", "checks": ["api_chain", "readonly_denial_preserves_state", "key_metadata_redacted"]}], "routes": ["POST /api/v1/apikeys", "GET /api/v1/apikeys/<int:key_id>", "POST /api/v1/pipelines"]},
     {"id": "isolation.same_pipeline", "area": "isolation", "kind": "graybox", "priority": "P1", "description": "Concurrent sessions in one Pipeline retain their own request identity and prior history", "bindings": [{"profile": "isolation", "case": "isolation.same_pipeline", "checks": ["conversation_isolation", "overlap_turn_1", "overlap_turn_2", "wire_identity_history_once"]}]},
     {"id": "isolation.cross_pipeline", "area": "isolation", "kind": "graybox", "priority": "P1", "description": "Concurrent Pipelines retain their own model routing, Bot identity, and conversation history", "bindings": [{"profile": "isolation", "case": "isolation.cross_pipeline", "checks": ["conversation_isolation", "overlap_turn_1", "overlap_turn_2", "wire_identity_history_once"]}]},
     {"id": "isolation.cancel_neighbor", "area": "isolation", "kind": "graybox", "priority": "P1", "description": "Cancelling an active tool run leaves a concurrent neighbor completed and no delayed tool side effect", "bindings": [{"profile": "isolation", "case": "isolation.cancel_neighbor", "checks": ["cancel_isolation", "neighbor_active_at_cancel", "cancellation_overlapped_neighbor", "neighbor_identity_once", "no_late_side_effect", "box_idle"]}]},

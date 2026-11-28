@@ -4,14 +4,16 @@
 import argparse
 import ast
 from collections import Counter
-import json
 import hashlib
-import re
-from urllib.parse import urlsplit
+import json
 from pathlib import Path
+import re
+import sys
+from urllib.parse import urlsplit
 
 CATALOG = Path(__file__).resolve().parents[1] / 'contracts' / 'regression_contracts.json'
 STATES = ('passed', 'failed', 'incomplete', 'skipped', 'not_run', 'missing_test')
+PRIORITIES = ('P0', 'P1', 'P2')
 
 
 def load_catalog(path=CATALOG):
@@ -23,11 +25,19 @@ def load_catalog(path=CATALOG):
         if item['id'] in seen or item['kind'] not in ('blackbox', 'graybox'):
             raise ValueError('Coverage contract IDs must be unique and kinds explicit')
         seen.add(item['id'])
-        if not item['description'] or not item['area'] or item['priority'] not in ('P0', 'P1', 'P2'):
+        if not item['description'] or not item['area'] or item['priority'] not in PRIORITIES:
             raise ValueError('Coverage contracts require a description, area and priority')
         for binding in item['bindings']:
-            if not binding['profile'] or not binding['case'] or not binding['checks']:
-                raise ValueError('Coverage bindings require a profile, case and actual assertions')
+            checks = binding.get('checks')
+            if (
+                not binding.get('profile')
+                or not binding.get('case')
+                or not isinstance(checks, list)
+                or not checks
+                or any(not isinstance(check, str) or not check.strip() for check in checks)
+                or len(set(checks)) != len(checks)
+            ):
+                raise ValueError('Coverage bindings require a profile, case and unique non-empty assertions')
     return catalog
 
 
@@ -237,13 +247,65 @@ def http_observations(paths, inventory):
 def counts(items):
     status = Counter(item['status'] for item in items)
     decided = status['passed'] + status['failed']
+    passed = status['passed']
     return {
         'total': len(items),
+        'passed': passed,
         'decided': decided,
+        'achievement_percent': round(100 * passed / len(items), 2) if items else None,
         'coverage_percent': round(100 * decided / len(items), 2) if items else None,
-        'pass_percent': round(100 * status['passed'] / decided, 2) if decided else None,
+        'pass_percent': round(100 * passed / decided, 2) if decided else None,
         'status': {name: status[name] for name in STATES},
     }
+
+
+def check_required_priorities(data, required_priorities, *, kind='blackbox'):
+    if kind not in ('blackbox', 'graybox'):
+        raise ValueError(f'Unsupported contract kind: {kind}')
+    unknown = [priority for priority in required_priorities if priority not in PRIORITIES]
+    if unknown:
+        raise ValueError(f'Unsupported priority levels: {", ".join(unknown)}')
+    ordered = [priority for priority in PRIORITIES if priority in set(required_priorities)]
+    selected = [item for item in data['contracts'] if item['kind'] == kind and item['priority'] in ordered]
+    unmet = [
+        {
+            'id': item['id'],
+            'priority': item['priority'],
+            'area': item['area'],
+            'status': item['status'],
+        }
+        for item in sorted(selected, key=lambda x: (x['priority'], x['area'], x['id']))
+        if item['status'] != 'passed'
+    ]
+    errors = []
+    if data.get('evidence_errors'):
+        errors.append('Evidence is incomplete; priority gate cannot pass with evidence errors')
+    for priority in ordered:
+        if not any(item['priority'] == priority for item in selected):
+            errors.append(f'No {kind} contracts registered for required priority {priority}')
+    for item in unmet:
+        errors.append(f'{item["priority"]} {kind} contract {item["id"]} ({item["area"]}): {item["status"]}')
+    return {
+        'required_priorities': ordered,
+        'kind': kind,
+        'passed': not errors,
+        'checked': len(selected),
+        'passed_count': sum(item['status'] == 'passed' for item in selected),
+        'unmet': unmet,
+        'errors': errors,
+    }
+
+
+def _percent(value):
+    return 'n/a' if value is None else f'{value}%'
+
+
+def _dashboard_row(label, summary):
+    st = summary['status']
+    return (
+        f'| {label} | {summary["passed"]}/{summary["total"]} | {_percent(summary["achievement_percent"])} '
+        f'| {st["failed"]} | {st["incomplete"]} | {st["skipped"]} | {st["not_run"]} | {st["missing_test"]} |'
+    )
 
 
 def report(catalog, rows, errors=()):
@@ -287,6 +349,7 @@ def report(catalog, rows, errors=()):
             else 'incomplete'
         )
         items.append({**contract, 'status': status, 'observations': dict(Counter(x['status'] for x in observations))})
+    blackbox = [x for x in items if x['kind'] == 'blackbox']
     return {
         'version': 1,
         'scope': catalog['scope'],
@@ -294,9 +357,9 @@ def report(catalog, rows, errors=()):
         'catalog_sha256': hashlib.sha256(json.dumps(catalog, sort_keys=True).encode()).hexdigest(),
         'complete_evidence': not errors,
         'kinds': {kind: counts([x for x in items if x['kind'] == kind]) for kind in ('blackbox', 'graybox')},
+        'priorities': {priority: counts([x for x in blackbox if x['priority'] == priority]) for priority in PRIORITIES},
         'areas': {
-            area: counts([x for x in items if x['kind'] == 'blackbox' and x['area'] == area])
-            for area in sorted({x['area'] for x in items if x['kind'] == 'blackbox'})
+            area: counts([x for x in blackbox if x['area'] == area]) for area in sorted({x['area'] for x in blackbox})
         },
         'contracts': items,
         'unclassified_cases': [
@@ -306,7 +369,7 @@ def report(catalog, rows, errors=()):
     }
 
 
-def write_report(directories, output, catalog_path=CATALOG, http_logs=()):
+def write_report(directories, output, catalog_path=CATALOG, http_logs=(), require_priorities=()):
     rows, errors = [], []
     for directory in directories:
         try:
@@ -323,6 +386,8 @@ def write_report(directories, output, catalog_path=CATALOG, http_logs=()):
         errors.extend(data['http_observations']['evidence_errors'])
         data['evidence_errors'] = list(errors)
         data['complete_evidence'] = not errors
+    if require_priorities:
+        data['priority_gate'] = check_required_priorities(data, require_priorities)
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
     (output / 'coverage.json').write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n')
@@ -339,8 +404,38 @@ def write_report(directories, output, catalog_path=CATALOG, http_logs=()):
     ]
     for kind, values in data['kinds'].items():
         lines.append(
-            f'| {kind} | {values["decided"]}/{values["total"]} | {values["coverage_percent"]}% | {values["pass_percent"]}% |'
+            f'| {kind} | {values["decided"]}/{values["total"]} | {_percent(values["coverage_percent"])} | {_percent(values["pass_percent"])} |'
         )
+    lines += [
+        '',
+        '## Blackbox progress by priority',
+        '',
+        '| Priority | Passed / total | Achievement | Failed | Incomplete | Skipped | Not run | Missing test |',
+        '|---|---:|---:|---:|---:|---:|---:|---:|',
+    ]
+    for priority in PRIORITIES:
+        lines.append(_dashboard_row(priority, data['priorities'][priority]))
+    lines += [
+        '',
+        '## Blackbox progress by area',
+        '',
+        '| Area | Passed / total | Achievement | Failed | Incomplete | Skipped | Not run | Missing test |',
+        '|---|---:|---:|---:|---:|---:|---:|---:|',
+    ]
+    for area, values in data['areas'].items():
+        lines.append(_dashboard_row(area, values))
+    if 'priority_gate' in data:
+        gate = data['priority_gate']
+        verdict = 'PASS' if gate['passed'] else 'FAIL'
+        lines += [
+            '',
+            '## Priority gate',
+            '',
+            f'Required {gate["kind"]} priorities: {", ".join(gate["required_priorities"])} — '
+            f'{verdict} ({gate["passed_count"]}/{gate["checked"]}).',
+        ]
+        for message in gate['errors']:
+            lines.append(f'- {message}')
     lines += ['', '| Priority | Contract | Area | Evidence | Status |', '|---|---|---|---|---|']
     for item in sorted(data['contracts'], key=lambda x: (x['priority'], x['area'], x['id'])):
         lines.append(
@@ -377,11 +472,29 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--run', type=Path, action='append', required=True)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--catalog', type=Path, default=CATALOG)
     parser.add_argument('--http-log', type=Path, action='append', default=[])
+    parser.add_argument(
+        '--require-priority',
+        action='append',
+        choices=PRIORITIES,
+        default=[],
+        help='Require 100% of blackbox contracts at this priority to be executed and passed (repeatable)',
+    )
     args = parser.parse_args()
-    data = write_report(args.run, args.output, http_logs=args.http_log)
+    data = write_report(
+        args.run,
+        args.output,
+        catalog_path=args.catalog,
+        http_logs=args.http_log,
+        require_priorities=args.require_priority,
+    )
     print(json.dumps(data['kinds'], indent=2))
-    if data['evidence_errors']:
+    gate_failed = 'priority_gate' in data and not data['priority_gate']['passed']
+    if gate_failed:
+        for message in data['priority_gate']['errors']:
+            print(f'Priority gate failed: {message}', file=sys.stderr)
+    if data['evidence_errors'] or gate_failed:
         raise SystemExit(1)
 
 

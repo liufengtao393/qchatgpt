@@ -8,7 +8,13 @@ from types import SimpleNamespace
 import unittest
 
 from tools.entrypoints.regression_ci import suite_profile
-from tools.regression.regression_isolation_cases import CASE_NAMES, check_reply, overlapping, verify_wire
+from tools.regression.regression_isolation_cases import (
+    CASE_NAMES,
+    check_reply,
+    overlapping,
+    verify_blackbox_replies,
+    verify_wire,
+)
 from tools.regression.regression_local_cases import DEFAULT_GROUPS
 from tools.regression.regression_scenarios import expanded_profile
 from tools.entrypoints.regression_suite import validate
@@ -80,6 +86,17 @@ class IsolationTests(unittest.TestCase):
             for rows in ([], [record, record], [crossed], [wrong_model], [wrong_reply], [incomplete]):
                 with self.subTest(rows=rows), self.assertRaises(ValueError):
                     check(rows)
+
+    def test_verify_blackbox_replies_rejects_missing_or_failed_receipts(self):
+        good = {'assertions': {'response_identity': 'passed', 'exact_reply': 'passed'}}
+        self.assertEqual(verify_blackbox_replies([good, good], 2), {'receipts': 2, 'isolated': True})
+        for bad in (
+            [good],
+            [good, {'assertions': {'response_identity': 'passed'}}],
+            [good, {'assertions': {'response_identity': 'passed', 'exact_reply': 'failed'}}],
+        ):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                verify_blackbox_replies(bad, 2)
 
 
 if __name__ == '__main__':

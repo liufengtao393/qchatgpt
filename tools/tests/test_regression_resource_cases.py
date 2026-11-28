@@ -1,5 +1,6 @@
 """Challenge public resource lifecycle oracles and their cleanup without starting services."""
 
+import hashlib
 import json
 from pathlib import Path
 import tempfile
@@ -209,6 +210,306 @@ class ResourceCasesTests(unittest.TestCase):
                 self.assertTrue(all(document['deleted'] for document in documents))
                 self.assertEqual(row['assertions']['document_cleanup'], 'passed')
                 self.assertEqual(list(self.root.glob('resource-documents-*')), [])
+
+    def test_workspace_isolation_enforces_selector_config_key_pinning_and_artifact_boundaries(self):
+        self.suite.env.clear()
+        with (
+            patch('tools.regression.regression_resource_cases.api') as mock_api,
+            self.assertRaises(ScenarioUnavailable),
+        ):
+            run_case(self.suite, {'scenario': 'workspace_isolation', 'expect': 'OK'}, {})
+        mock_api.assert_not_called()
+
+        for fault in (None, 'foreign_pipeline_read', 'principal_artifact_read'):
+            with self.subTest(fault=fault):
+                self.suite.env = {'LANGBOT_QA_USER_TOKEN': 'private-user-token'}
+                self.suite.secrets = []
+                state = {
+                    'pipeline': None,
+                    'key': {'id': 9, 'uuid': 'child-key-uuid', 'status': 'active', 'secret_available': False},
+                    'artifact': None,
+                    'language': 'en_US',
+                }
+                row = {'after_id': 0}
+
+                def fake_api(suite, method, path, body=None, headers=None):
+                    headers = headers or {}
+                    ws_header = headers.get('X-Workspace-Id')
+                    is_api_key = 'X-API-Key' in headers
+                    is_foreign = not is_api_key and ws_header and ws_header != 'workspace'
+
+                    if is_foreign:
+                        if fault == 'foreign_pipeline_read' and method == 'GET' and path == '/api/v1/pipelines':
+                            return success({'pipelines': [state['pipeline']]})
+                        return 404, {'code': 'resource_not_found'}
+
+                    if path == '/api/v1/pipelines' and method == 'POST':
+                        state['pipeline'] = {
+                            'uuid': 'own-pipe',
+                            'name': body['name'],
+                            'description': body['description'],
+                        }
+                        return success({'uuid': 'own-pipe'})
+                    if path == '/api/v1/pipelines' and method == 'GET':
+                        return success({'pipelines': [state['pipeline']] if state['pipeline'] else []})
+                    if path == '/api/v1/pipelines/own-pipe':
+                        if method == 'DELETE':
+                            state['pipeline'] = None
+                            return success()
+                        return (
+                            (404, {'code': -1})
+                            if state['pipeline'] is None
+                            else success({'pipeline': state['pipeline']})
+                        )
+                    if path == '/api/v1/apikeys' and method == 'POST':
+                        state['key']['name'] = body['name']
+                        return success(
+                            {'key': {**state['key'], 'key': 'private-iso-child-key', 'secret_available': True}}
+                        )
+                    if path == '/api/v1/apikeys/9':
+                        if method == 'DELETE':
+                            state['key']['status'] = 'revoked'
+                            return success()
+                        return success({'key': state['key']})
+                    if path == '/api/v1/system/context':
+                        self.assertEqual(headers.get('X-API-Key'), 'private-iso-child-key')
+                        return success({'workspace_uuid': 'workspace', 'api_key_id': 'child-key-uuid'})
+                    if path == '/api/v1/workspaces/current/language':
+                        if method == 'GET':
+                            return success({'language': state['language'], 'supported_languages': ['en_US', 'zh_Hans']})
+                        if is_api_key:
+                            return 403, {'code': 'permission_denied'}
+                        state['language'] = body['language']
+                        return success({'language': state['language']})
+                    if path.startswith('/api/v1/artifacts/'):
+                        if is_api_key:
+                            if fault == 'principal_artifact_read' and method == 'GET':
+                                return success(state['artifact']['meta'])
+                            return 404, {'code': 'resource_not_found'}
+                        if path.endswith('/release'):
+                            return success(state['artifact']['meta'])
+                        if method == 'DELETE':
+                            state['artifact'] = None
+                            return success({'id': 'art_' + 'a' * 32, 'deleted': True})
+                        if state['artifact'] is None:
+                            return 404, {'code': 'resource_not_found'}
+                        return success(state['artifact']['meta'])
+                    raise AssertionError(f'Unexpected api call: {method} {path}')
+
+                def fake_upload(
+                    suite, filename, content, *, headers, mime_type='application/octet-stream', ttl_seconds=3600
+                ):
+                    meta = {
+                        'id': 'art_' + 'a' * 32,
+                        'name': filename,
+                        'size': len(content),
+                        'digest': hashlib.sha256(content).hexdigest(),
+                        'lifecycle': 'temporary',
+                        'expires_at': '2026-11-29T00:00:00+00:00',
+                    }
+                    state['artifact'] = {'meta': meta, 'content': content}
+                    return success(meta)
+
+                def fake_raw(suite, method, path, *, headers=None, data=None):
+                    headers = headers or {}
+                    ws_header = headers.get('X-Workspace-Id')
+                    is_api_key = 'X-API-Key' in headers
+                    if not is_api_key and ws_header and ws_header != 'workspace':
+                        return 404, {}, b'{"code":"resource_not_found"}'
+                    if is_api_key:
+                        return 404, {}, b'{"code":"resource_not_found"}'
+                    return 200, {}, state['artifact']['content']
+
+                with (
+                    patch('tools.regression.regression_resource_cases.api', side_effect=fake_api),
+                    patch('tools.regression.regression_resource_cases.upload_artifact', side_effect=fake_upload),
+                    patch('tools.regression.regression_resource_cases.raw_request', side_effect=fake_raw),
+                ):
+                    case = {'scenario': 'workspace_isolation', 'expect': 'LANGBOT_WORKSPACE_ISOLATION_OK'}
+                    if fault == 'foreign_pipeline_read':
+                        with self.assertRaisesRegex(ValueError, 'Foreign Workspace selector'):
+                            run_case(self.suite, case, row)
+                        self.assertEqual(row['assertions']['workspace_read_denied'], 'failed')
+                    elif fault == 'principal_artifact_read':
+                        with self.assertRaisesRegex(ValueError, 'Another principal read'):
+                            run_case(self.suite, case, row)
+                        self.assertEqual(row['assertions']['principal_artifact_isolated'], 'failed')
+                    else:
+                        result = run_case(self.suite, case, row)
+                        self.assertEqual(result['result'], 'LANGBOT_WORKSPACE_ISOLATION_OK')
+                        for check_name in (
+                            'workspace_read_denied',
+                            'workspace_write_denied',
+                            'workspace_state_preserved',
+                            'workspace_config_read_denied',
+                            'workspace_config_write_denied',
+                            'workspace_config_preserved',
+                            'workspace_key_pinned',
+                            'workspace_artifact_read_denied',
+                            'workspace_artifact_write_denied',
+                            'principal_artifact_isolated',
+                        ):
+                            self.assertEqual(row['assertions'][check_name], 'passed')
+                self.assertIsNone(state['pipeline'])
+                self.assertIsNone(state['artifact'])
+                self.assertEqual(state['key']['status'], 'revoked')
+                self.assertEqual(row['assertions']['workspace_isolation_cleanup'], 'passed')
+                evidence = json.dumps(row) + (self.root / row['resource_journal']).read_text()
+                self.assertNotIn('private-iso-child-key', evidence)
+                self.assertNotIn('private-user-token', evidence)
+
+    def test_artifact_storage_lifecycle_roundtrip_retain_release_delete_and_cleanup(self):
+        for allow_retained_delete in (False, True):
+            with self.subTest(allow_retained_delete=allow_retained_delete):
+                state = {'meta': None, 'content': None, 'retained': False}
+                row = {'after_id': 0}
+
+                def fake_upload(
+                    suite, filename, content, *, headers, mime_type='application/octet-stream', ttl_seconds=3600
+                ):
+                    state['content'] = content
+                    state['meta'] = {
+                        'id': 'art_' + 'b' * 32,
+                        'name': filename,
+                        'mime_type': mime_type,
+                        'size': len(content),
+                        'digest': hashlib.sha256(content).hexdigest(),
+                        'lifecycle': 'temporary',
+                        'expires_at': '2026-11-29T00:00:00+00:00',
+                    }
+                    return success(dict(state['meta']))
+
+                def fake_api(suite, method, path, body=None, headers=None):
+                    if state['meta'] is None:
+                        return 404, {'code': 'resource_not_found'}
+                    if path.endswith('/retain') and method == 'POST':
+                        state['retained'] = True
+                        state['meta']['lifecycle'] = 'persistent'
+                        state['meta']['expires_at'] = None
+                        return success(dict(state['meta']))
+                    if path.endswith('/release') and method == 'POST':
+                        state['retained'] = False
+                        state['meta']['lifecycle'] = 'temporary'
+                        state['meta']['expires_at'] = '2026-11-29T00:00:00+00:00'
+                        return success(dict(state['meta']))
+                    if method == 'DELETE':
+                        if state['retained'] and not allow_retained_delete:
+                            return 409, {'code': 'artifact_in_use'}
+                        aid = state['meta']['id']
+                        state['meta'] = None
+                        state['content'] = None
+                        return success({'id': aid, 'deleted': True})
+                    return success(dict(state['meta']))
+
+                def fake_raw(suite, method, path, *, headers=None, data=None):
+                    if not headers:
+                        return 401, {}, b'{"code":"invalid_authentication"}'
+                    if state['meta'] is None:
+                        return 404, {}, b'{"code":"resource_not_found"}'
+                    if 'max_bytes=1' in path:
+                        return 413, {}, b'{"code":"artifact_too_large"}'
+                    return (
+                        200,
+                        {
+                            'etag': f'"{state["meta"]["digest"]}"',
+                            'x-content-type-options': 'nosniff',
+                            'cache-control': 'private, no-store',
+                        },
+                        state['content'],
+                    )
+
+                with (
+                    patch(
+                        'tools.regression.regression_resource_cases.auth_headers',
+                        return_value={'Authorization': 'Bearer k'},
+                    ),
+                    patch('tools.regression.regression_resource_cases.upload_artifact', side_effect=fake_upload),
+                    patch('tools.regression.regression_resource_cases.api', side_effect=fake_api),
+                    patch('tools.regression.regression_resource_cases.raw_request', side_effect=fake_raw),
+                ):
+                    case = {'scenario': 'artifact_storage_lifecycle', 'expect': 'LANGBOT_ARTIFACT_STORAGE_OK'}
+                    if allow_retained_delete:
+                        with self.assertRaisesRegex(ValueError, 'HTTP 409'):
+                            run_case(self.suite, case, row)
+                        self.assertEqual(row['assertions']['artifact_delete_blocked_while_retained'], 'failed')
+                    else:
+                        res = run_case(self.suite, case, row)
+                        self.assertEqual(res['result'], 'LANGBOT_ARTIFACT_STORAGE_OK')
+                        for check_name in (
+                            'artifact_upload',
+                            'artifact_metadata_readback',
+                            'artifact_content_roundtrip',
+                            'artifact_max_bytes_guard',
+                            'artifact_unauthenticated_denied',
+                            'artifact_retain_persistent',
+                            'artifact_delete_blocked_while_retained',
+                            'artifact_release_temporary',
+                            'artifact_deleted_unavailable',
+                        ):
+                            self.assertEqual(row['assertions'][check_name], 'passed')
+                self.assertIsNone(state['meta'])
+                self.assertEqual(row['assertions']['artifact_cleanup'], 'passed')
+
+    def test_runtime_connectivity_readiness_checks_ping_box_and_plugins(self):
+        self.suite.env.clear()
+        with self.assertRaises(ScenarioUnavailable):
+            run_case(self.suite, {'scenario': 'runtime_connectivity_readiness', 'expect': 'OK'}, {})
+
+        for fault in (None, 'disconnected_runtime', 'missing_plugin'):
+            with self.subTest(fault=fault):
+                self.suite.env = {'LANGBOT_QA_USER_TOKEN': 'private-user-token'}
+                self.suite.profile['smoke'] = {'required_plugins': ['langbot-team/LocalAgent']}
+                row = {}
+
+                def fake_api(suite, method, path, body=None, headers=None):
+                    if path == '/api/v1/system/status/plugin-system':
+                        connected = fault != 'disconnected_runtime'
+                        return success(
+                            {
+                                'is_enable': True,
+                                'is_connected': connected,
+                                'plugin_connector_error': 'ok' if connected else 'ws closed',
+                            }
+                        )
+                    if path == '/api/v1/box/runtime-status':
+                        return success(
+                            {'enabled': True, 'available': True, 'backend': {'name': 'docker', 'available': True}}
+                        )
+                    if path == '/api/v1/box/status':
+                        return success({'enabled': True, 'available': True})
+                    if path == '/api/v1/plugins':
+                        plugins = (
+                            []
+                            if fault == 'missing_plugin'
+                            else [
+                                {
+                                    'enabled': True,
+                                    'status': 'initialized',
+                                    'manifest': {
+                                        'manifest': {'metadata': {'author': 'langbot-team', 'name': 'LocalAgent'}}
+                                    },
+                                }
+                            ]
+                        )
+                        return success({'plugins': plugins})
+                    raise AssertionError(f'Unexpected api call: {method} {path}')
+
+                with patch('tools.regression.regression_resource_cases.api', side_effect=fake_api):
+                    case = {'scenario': 'runtime_connectivity_readiness', 'expect': 'LANGBOT_RUNTIME_READY_OK'}
+                    if fault == 'disconnected_runtime':
+                        with self.assertRaisesRegex(ValueError, 'Plugin Runtime health ping'):
+                            run_case(self.suite, case, row)
+                        self.assertEqual(row['assertions']['runtime_plugin_ping'], 'failed')
+                    elif fault == 'missing_plugin':
+                        with self.assertRaisesRegex(ValueError, 'not initialized'):
+                            run_case(self.suite, case, row)
+                        self.assertEqual(row['assertions']['runtime_plugins_initialized'], 'failed')
+                    else:
+                        res = run_case(self.suite, case, row)
+                        self.assertEqual(res['result'], 'LANGBOT_RUNTIME_READY_OK')
+                        self.assertEqual(row['assertions']['runtime_plugin_ping'], 'passed')
+                        self.assertEqual(row['assertions']['runtime_box_ready'], 'passed')
+                        self.assertEqual(row['assertions']['runtime_plugins_initialized'], 'passed')
 
 
 if __name__ == '__main__':

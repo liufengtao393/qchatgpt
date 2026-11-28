@@ -3,12 +3,15 @@
 import copy
 import json
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 
 from tools.regression.evidence import checked
 
 from tools.entrypoints.regression_coverage import (
+    check_required_priorities,
     collect,
     http_observations,
     load_catalog,
@@ -374,6 +377,241 @@ class Routes:
             path.write_text(json.dumps(broken))
             with self.assertRaises(ValueError):
                 load_catalog(path)
+
+    def test_catalog_validation_rejects_hollow_checks_and_covers_high_risk_p0_areas(self):
+        c = load_catalog()
+        for invalid_checks in ([], [''], ['  '], ['response', 'response']):
+            broken = copy.deepcopy(c)
+            broken['contracts'][0]['bindings'][0]['checks'] = invalid_checks
+            with tempfile.TemporaryDirectory() as d:
+                path = Path(d) / 'catalog.json'
+                path.write_text(json.dumps(broken))
+                with self.assertRaises(ValueError):
+                    load_catalog(path)
+
+        p0_blackbox = [item for item in c['contracts'] if item['kind'] == 'blackbox' and item['priority'] == 'P0']
+        self.assertTrue(p0_blackbox)
+        self.assertEqual([item['id'] for item in p0_blackbox if not item['bindings']], [])
+        for area in ('persistence', 'storage', 'agent', 'runtime', 'workspace', 'isolation'):
+            area_p0 = [item for item in p0_blackbox if item['area'] == area]
+            self.assertGreaterEqual(len(area_p0), 4, f'Expected >=4 bound P0 blackbox contracts in {area}')
+
+        empty_report = report(c, [])
+        self.assertEqual(empty_report['priorities']['P0']['passed'], 0)
+        self.assertEqual(empty_report['priorities']['P0']['status']['not_run'], len(p0_blackbox))
+        self.assertEqual(empty_report['priorities']['P0']['status']['missing_test'], 0)
+        gate = check_required_priorities(empty_report, ('P0',))
+        self.assertFalse(gate['passed'])
+        self.assertEqual(len(gate['unmet']), len(p0_blackbox))
+
+    def test_priority_and_area_dashboard_reports_achievement_and_status_breakdown(self):
+        c = {
+            'version': 1,
+            'scope': 'Dashboard scope',
+            'contracts': [
+                {
+                    'id': 'storage.ok',
+                    'area': 'storage',
+                    'kind': 'blackbox',
+                    'priority': 'P0',
+                    'description': 'Passed storage contract',
+                    'bindings': [{'profile': 'scenarios', 'case': 's1', 'checks': ['a']}],
+                },
+                {
+                    'id': 'storage.fail',
+                    'area': 'storage',
+                    'kind': 'blackbox',
+                    'priority': 'P0',
+                    'description': 'Failed storage contract',
+                    'bindings': [{'profile': 'scenarios', 'case': 's2', 'checks': ['b']}],
+                },
+                {
+                    'id': 'runtime.not_run',
+                    'area': 'runtime',
+                    'kind': 'blackbox',
+                    'priority': 'P0',
+                    'description': 'Not run runtime contract',
+                    'bindings': [{'profile': 'scenarios', 'case': 's3', 'checks': ['c']}],
+                },
+                {
+                    'id': 'agent.incomplete',
+                    'area': 'agent',
+                    'kind': 'blackbox',
+                    'priority': 'P1',
+                    'description': 'Incomplete agent contract',
+                    'bindings': [{'profile': 'scenarios', 'case': 's4', 'checks': ['d1', 'd2']}],
+                },
+                {
+                    'id': 'persistence.gap',
+                    'area': 'persistence',
+                    'kind': 'blackbox',
+                    'priority': 'P2',
+                    'description': 'Unbound gap',
+                    'bindings': [],
+                },
+                {
+                    'id': 'isolation.gray',
+                    'area': 'isolation',
+                    'kind': 'graybox',
+                    'priority': 'P0',
+                    'description': 'Graybox must not inflate blackbox priority counts',
+                    'bindings': [{'profile': 'scenarios', 'case': 's1', 'checks': ['a']}],
+                },
+            ],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            catalog_path = root / 'catalog.json'
+            catalog_path.write_text(json.dumps(c))
+            run_dir = root / 'run'
+            run_dir.mkdir()
+            (run_dir / 'profile.json').write_text(json.dumps({'coverage_suite': 'scenarios', 'smoke': {}}))
+            (run_dir / 'cases.json').write_text(
+                json.dumps(
+                    [
+                        {'case': 's1', 'status': 'passed', 'assertions': {'a': 'passed'}},
+                        {'case': 's2', 'status': 'failed', 'assertions': {'b': 'failed'}},
+                        {'case': 's4', 'status': 'passed', 'assertions': {'d1': 'passed'}},
+                    ]
+                )
+            )
+            out_dir = root / 'out'
+            data = write_report([run_dir], out_dir, catalog_path=catalog_path, require_priorities=('P0',))
+            self.assertEqual(data['priorities']['P0']['total'], 3)
+            self.assertEqual(data['priorities']['P0']['passed'], 1)
+            self.assertEqual(data['priorities']['P0']['achievement_percent'], 33.33)
+            self.assertEqual(data['priorities']['P0']['status']['failed'], 1)
+            self.assertEqual(data['priorities']['P0']['status']['not_run'], 1)
+            self.assertEqual(data['priorities']['P1']['status']['incomplete'], 1)
+            self.assertEqual(data['priorities']['P2']['status']['missing_test'], 1)
+            self.assertEqual(data['areas']['storage']['passed'], 1)
+            self.assertEqual(data['areas']['storage']['total'], 2)
+            self.assertEqual(data['areas']['storage']['achievement_percent'], 50.0)
+            self.assertEqual(data['areas']['runtime']['status']['not_run'], 1)
+            self.assertNotIn('isolation', data['areas'])
+            self.assertFalse(data['priority_gate']['passed'])
+            self.assertEqual(
+                [item['id'] for item in data['priority_gate']['unmet']], ['runtime.not_run', 'storage.fail']
+            )
+            markdown = (out_dir / 'coverage.md').read_text()
+            self.assertIn('## Blackbox progress by priority', markdown)
+            self.assertIn('| P0 | 1/3 | 33.33% | 1 | 0 | 0 | 1 | 0 |', markdown)
+            self.assertIn('## Blackbox progress by area', markdown)
+            self.assertIn('| storage | 1/2 | 50.0% | 1 | 0 | 0 | 0 | 0 |', markdown)
+            self.assertIn('## Priority gate', markdown)
+            self.assertIn('Required blackbox priorities: P0 — FAIL (1/3).', markdown)
+
+    def test_require_priority_cli_blocks_missing_or_incomplete_p0_and_passes_when_complete(self):
+        c = {
+            'version': 1,
+            'scope': 'CLI gate scope',
+            'contracts': [
+                {
+                    'id': 'p0.one',
+                    'area': 'workspace',
+                    'kind': 'blackbox',
+                    'priority': 'P0',
+                    'description': 'First P0 contract',
+                    'bindings': [{'profile': 'smoke', 'case': 'c1', 'checks': ['ok']}],
+                },
+                {
+                    'id': 'p0.two',
+                    'area': 'storage',
+                    'kind': 'blackbox',
+                    'priority': 'P0',
+                    'description': 'Second P0 contract',
+                    'bindings': [{'profile': 'smoke', 'case': 'c2', 'checks': ['ok']}],
+                },
+                {
+                    'id': 'p1.optional',
+                    'area': 'agent',
+                    'kind': 'blackbox',
+                    'priority': 'P1',
+                    'description': 'Unrun P1 contract does not block P0 gate',
+                    'bindings': [{'profile': 'scenarios', 'case': 'c3', 'checks': ['ok']}],
+                },
+            ],
+        }
+        repo_root = Path(__file__).resolve().parents[2]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            catalog_path = root / 'catalog.json'
+            catalog_path.write_text(json.dumps(c))
+            run_dir = root / 'run'
+            run_dir.mkdir()
+            (run_dir / 'profile.json').write_text(json.dumps({'coverage_suite': 'smoke', 'smoke': {}}))
+
+            # Missing c2 -> P0 gate must fail with exit code 1.
+            (run_dir / 'cases.json').write_text(
+                json.dumps([{'case': 'c1', 'status': 'passed', 'assertions': {'ok': 'passed'}}])
+            )
+            fail_out = root / 'out-fail'
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    '-m',
+                    'tools.entrypoints.regression_coverage',
+                    '--run',
+                    str(run_dir),
+                    '--output',
+                    str(fail_out),
+                    '--catalog',
+                    str(catalog_path),
+                    '--require-priority',
+                    'P0',
+                ],
+                cwd=repo_root,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(proc.returncode, 1)
+            self.assertIn('p0.two', proc.stderr)
+            self.assertFalse(json.loads((fail_out / 'coverage.json').read_text())['priority_gate']['passed'])
+
+            # Both P0 passed (even though P1 is not_run) -> P0 gate passes with exit code 0.
+            (run_dir / 'cases.json').write_text(
+                json.dumps(
+                    [
+                        {'case': 'c1', 'status': 'passed', 'assertions': {'ok': 'passed'}},
+                        {'case': 'c2', 'status': 'passed', 'assertions': {'ok': 'passed'}},
+                    ]
+                )
+            )
+            pass_out = root / 'out-pass'
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    '-m',
+                    'tools.entrypoints.regression_coverage',
+                    '--run',
+                    str(run_dir),
+                    '--output',
+                    str(pass_out),
+                    '--catalog',
+                    str(catalog_path),
+                    '--require-priority',
+                    'P0',
+                ],
+                cwd=repo_root,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            saved = json.loads((pass_out / 'coverage.json').read_text())
+            self.assertTrue(saved['priority_gate']['passed'])
+            self.assertEqual(saved['priority_gate']['passed_count'], 2)
+            self.assertIn('Required blackbox priorities: P0 — PASS (2/2).', (pass_out / 'coverage.md').read_text())
+
+            # Evidence errors must block priority gate even if contracts look passed.
+            bad_report = report(
+                c,
+                [
+                    {'profile': 'smoke', 'case': 'c1', 'status': 'passed', 'assertions': {'ok': 'passed'}},
+                    {'profile': 'smoke', 'case': 'c2', 'status': 'passed', 'assertions': {'ok': 'passed'}},
+                ],
+                errors=['corrupt log'],
+            )
+            self.assertFalse(check_required_priorities(bad_report, ('P0',))['passed'])
 
 
 if __name__ == '__main__':
