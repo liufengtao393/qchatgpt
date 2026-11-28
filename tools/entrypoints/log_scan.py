@@ -1,4 +1,4 @@
-"""Build a report-only anomaly summary from regression service logs."""
+"""Scan regression service logs for anomalies and enforce hard-gate exit codes."""
 
 import argparse
 from collections import Counter, defaultdict
@@ -8,10 +8,14 @@ import json
 from pathlib import Path
 import re
 from statistics import median
+import sys
 
 import yaml
 
 from tools.regression.service_logs import TRACE, records
+
+
+BLOCKING_KINDS = frozenset({'error', 'traceback', 'http_5xx', 'empty_exception_message'})
 
 
 SECRET = re.compile(
@@ -127,10 +131,32 @@ def scan(files, allowlist, baselines):
     )
 
 
-def markdown(report):
+def blocking_anomalies(report, *, strict=False):
     anomalies = report['anomalies']
+    if strict:
+        return list(anomalies)
+    return [group for group in anomalies if group['kind'] in BLOCKING_KINDS]
+
+
+def gate_summary(report, *, strict=False):
+    blocking = blocking_anomalies(report, strict=strict)
+    return dict(
+        mode='strict' if strict else 'default',
+        passed=not blocking,
+        blocking_count=len(blocking),
+        total_anomalies=len(report['anomalies']),
+        blocking_kinds=sorted(BLOCKING_KINDS),
+    )
+
+
+def markdown(report, *, strict=False):
+    anomalies = report['anomalies']
+    gate = report.get('gate') or gate_summary(report, strict=strict)
+    verdict = 'PASS' if gate['passed'] else 'FAIL'
     lines = [
         f'## Service logs: anomaly groups ({len(anomalies)})',
+        '',
+        f'Gate: **{verdict}** (`mode={gate["mode"]}`, `blocking={gate["blocking_count"]}`, `total={gate["total_anomalies"]}`)',
         '',
         'Service | Lines | Unparsed',
         '--- | ---: | ---:',
@@ -153,28 +179,71 @@ def markdown(report):
     return '\n'.join(lines) + '\n'
 
 
-def main():
+def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--input', nargs='+', required=True)
     parser.add_argument('--service-map', default='')
     parser.add_argument('--allowlist', type=Path, required=True)
     parser.add_argument('--baseline', nargs='+', type=Path, default=[])
     parser.add_argument('--output', type=Path, required=True)
-    args = parser.parse_args()
+    parser.add_argument(
+        '--strict',
+        action='store_true',
+        help='Fail on any unallowlisted anomaly (including warnings, warning growth, and unparsed ratio), not only blocking errors/tracebacks/5xx.',
+    )
+    args = parser.parse_args(argv)
+    if not args.allowlist.is_file():
+        parser.error(f'allowlist file not found: {args.allowlist}')
     mapping = dict(item.split('=', 1) for item in args.service_map.split(',') if item)
-    paths = sorted({Path(path).resolve() for pattern in args.input for path in glob.iglob(pattern, recursive=True)})
+    paths = sorted(
+        {
+            Path(path).resolve()
+            for pattern in args.input
+            for path in glob.iglob(pattern, recursive=True)
+            if Path(path).is_file()
+        }
+    )
     if not paths:
         parser.error('no input logs matched')
+    raw_allowlist = yaml.safe_load(args.allowlist.read_text(encoding='utf-8'))
+    if raw_allowlist is None:
+        allowlist = []
+    elif isinstance(raw_allowlist, list):
+        allowlist = raw_allowlist
+    else:
+        parser.error('allowlist must be a YAML list of rules')
     files = [(path, mapping.get(path.name, path.stem)) for path in paths]
     baselines = [
-        json.loads((path / 'log-anomalies.json' if path.is_dir() else path).read_text())['warn_counts']
+        json.loads((path / 'log-anomalies.json' if path.is_dir() else path).read_text(encoding='utf-8'))['warn_counts']
         for path in args.baseline
     ]
-    report = scan(files, yaml.safe_load(args.allowlist.read_text()) or [], baselines)
+    report = scan(files, allowlist, baselines)
+    blocking = blocking_anomalies(report, strict=args.strict)
+    report['gate'] = gate_summary(report, strict=args.strict)
     args.output.mkdir(exist_ok=True, parents=True)
-    (args.output / 'log-anomalies.json').write_text(json.dumps(report, ensure_ascii=False, indent=2) + '\n')
-    (args.output / 'log-anomalies.md').write_text(markdown(report))
+    (args.output / 'log-anomalies.json').write_text(
+        json.dumps(report, ensure_ascii=False, indent=2) + '\n', encoding='utf-8'
+    )
+    (args.output / 'log-anomalies.md').write_text(markdown(report, strict=args.strict), encoding='utf-8')
+    verdict = 'PASS' if report['gate']['passed'] else 'FAIL'
+    summary_line = (
+        f'log_scan: {verdict} '
+        f'(mode={report["gate"]["mode"]}, services={len(report["services"])}, '
+        f'total_anomalies={report["gate"]["total_anomalies"]}, blocking_anomalies={report["gate"]["blocking_count"]})'
+    )
+    if blocking:
+        print(summary_line, file=sys.stderr)
+        for group in blocking[:10]:
+            print(
+                f'  - [{group["kind"]}] {group["service"]} (x{group["count"]}): {group["fingerprint"]}',
+                file=sys.stderr,
+            )
+        if len(blocking) > 10:
+            print(f'  ... and {len(blocking) - 10} more blocking anomalies in log-anomalies.json', file=sys.stderr)
+        return 1
+    print(summary_line)
+    return 0
 
 
 if __name__ == '__main__':
-    main()
+    raise SystemExit(main())

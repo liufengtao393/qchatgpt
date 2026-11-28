@@ -1,43 +1,55 @@
-# Daily run 45060526415. Startup banners remain in the unparsed line totals.
-- pattern: 'core||||GET /api/v1/provider/providers/# 404'
-  reason: Cleanup checks confirm deleted resources no longer exist.
+# Audited against Daily Endurance runs 45248584314..46056410089 and Core Smoke /
+# Persistence Acceptance run 46153230597 (master@52f516734) under unified logging (#3148).
+# Real intermittent warnings (e.g. Terminal monitoring write failed: TimeoutError) are
+# intentionally NOT allowlisted.
+- pattern: 'core|CORE.HTTP|access||GET /api/v1/provider/providers/# 404'
+  reason: Cleanup checks confirm deleted providers no longer exist.
   max_count: 4
-- pattern: 'core||||GET /api/v1/provider/models/llm/# 404'
-  reason: Cleanup checks confirm deleted resources no longer exist.
+- pattern: 'core|CORE.HTTP|access||GET /api/v1/provider/models/llm/# 404'
+  reason: Cleanup checks confirm deleted LLM models no longer exist.
   max_count: 3
-- pattern: 'core||||GET /api/v1/provider/models/embedding/# 404'
-  reason: Cleanup checks confirm deleted resources no longer exist.
+- pattern: 'core|CORE.HTTP|access||GET /api/v1/provider/models/embedding/# 404'
+  reason: Cleanup checks confirm deleted embedding models no longer exist.
   max_count: 1
-- pattern: 'core||||GET /api/v1/platform/bots/# 404'
-  reason: Cleanup checks confirm deleted resources no longer exist.
+- pattern: 'core|CORE.HTTP|access||GET /api/v1/platform/bots/# 404'
+  reason: Cleanup checks confirm deleted bots no longer exist.
   max_count: 3
-- pattern: 'core||||GET /api/v1/pipelines/# 404'
-  reason: Cleanup checks confirm deleted resources no longer exist.
+- pattern: 'core|CORE.HTTP|access||GET /api/v1/pipelines/# 404'
+  reason: Cleanup checks confirm deleted pipelines no longer exist.
   max_count: 3
-- pattern: 'core||||GET /api/v1/knowledge/bases/# 404'
-  reason: Cleanup checks confirm deleted resources no longer exist.
-  max_count: 1
-- pattern: 'core|app.py|||WebUI files are missing,*'
-  reason: The headless CI checkout has no built WebUI.
-  max_count: 1
-- pattern: 'core|app.py|||WebUI 文件缺失，*'
-  reason: Chinese version of the same headless startup warning.
-  max_count: 1
-- pattern: 'core|plugin_permissions.py|||Plugin langbot-team/* has no permission declaration.*'
-  reason: Compatibility mode for the regression plugin fixtures.
+- pattern: 'core|CORE.HTTP|access||GET /api/v1/knowledge/bases/# 404'
+  reason: Cleanup checks confirm deleted knowledge bases no longer exist (1 in daily, up to 3 in core-smoke).
+  max_count: 3
+- pattern: 'core|CORE.APP|print_web_access_info||WebUI files are missing,*'
+  reason: Headless CI checkouts have no built WebUI (1 per Core startup; up to 7 Core processes in persistence acceptance).
+  max_count: 7
+- pattern: 'core|CORE.APP|print_web_access_info||WebUI 文件缺失，*'
+  reason: Chinese version of the same headless startup warning (up to 7 Core processes in persistence acceptance).
+  max_count: 7
+- pattern: 'core|CORE.API|warn_compatibility||Plugin langbot-team/* has no permission declaration.*'
+  reason: Compatibility mode for official langbot-team regression plugin fixtures.
   max_count: 2
-- pattern: 'core|api_jwt.py||InsecureKeyLengthWarning|The HMAC key is *'
-  reason: The disposable local JWT fixture uses a short key.
+- pattern: 'core|CORE.API|warn_compatibility||Plugin RockChinQ/FAQManager has no permission declaration.*'
+  reason: Compatibility mode for the FAQManager regression plugin fixture in core-smoke.
   max_count: 2
-- pattern: 'runtime|handler.py|||Runtime action delete_plugin failed with ValueError'
-  reason: Plugin setup attempts removal before installing the three fixtures.
-  max_count: 3
-- pattern: 'runtime|stdio.py|||Skipping non-JSON output on stdio connection'
-  reason: One startup output line per fixture plugin.
-  max_count: 3
-- pattern: 'runtime|stdio.py|||Error receiving message: Connection closed'
-  reason: The three stdio connections close during Runtime shutdown.
-  max_count: 3
-- pattern: 'runtime|mgr.py|||Failed to notify revoked plugin worker: Connection closed'
-  reason: Revocation races the closed worker at shutdown.
+- pattern: 'core|CORE.PY|_showwarnmsg||*/jwt/api_jwt.py:#: InsecureKeyLengthWarning: The HMAC key is *'
+  reason: Disposable local JWT fixture uses a short HMAC key across encode and decode callsites.
+  max_count: 2
+- pattern: 'runtime|RUNTIME.IO|_handle_action||Runtime action delete_plugin failed with ValueError'
+  reason: Plugin setup attempts pre-install removal of regression fixtures (3 in daily/api, 5 in core-smoke).
+  max_count: 5
+- pattern: 'runtime|RUNTIME.IO|receive||Skipping non-JSON output on stdio connection'
+  reason: Expected startup/non-JSON output lines from stdio fixture plugins (3 in daily/api, up to 6 in core-smoke).
+  max_count: 6
+- pattern: 'runtime|RUNTIME.IO|receive||Error receiving message: Connection closed'
+  reason: Stdio plugin connections may close a few milliseconds ahead of the Runtime shutdown flag (up to 5 fixture workers).
+  max_count: 5
+- pattern: 'runtime|RUNTIME.PLUGIN|_stop_installation_worker||Failed to notify revoked plugin worker: Connection closed'
+  reason: Revocation races the closed worker at Runtime shutdown.
+  max_count: 1
+- pattern: 'runtime|RUNTIME.PLUGIN|_stop_installation_worker||Failed to notify revoked plugin worker: Connection closed during send'
+  reason: Revocation send races the closed worker at Runtime shutdown (observed in daily-api).
+  max_count: 1
+- pattern: 'core|CORE.PLUGIN|call_tool|langbot_plugin.box.errors.BoxValidationError|Failed to execute tool register_skill BoxValidationError: Skill draft path must be a normalized absolute path under /workspace'
+  reason: Expected negative-path traversal test in tests/e2e/test_skill_network_runtime.py (register_skill /workspace/../../etc); tighten once Core avoids logging exc_info for expected BoxValidationError.
   max_count: 1

@@ -160,14 +160,19 @@ jobs:
           PY_STOP
       - name: Scan persistence service logs
         if: always()
-        continue-on-error: true
         run: |
           out=.qa/persistence-runtime
+          set +e
           uv run --no-sync python -m tools.entrypoints.log_scan \
             --input "$out/**/langbot.*.log" "$out/**/before-restart-langbot.*.log" "$out/minio.log" \
             --service-map langbot.stdout.log=core,langbot.stderr.log=core,before-restart-langbot.stdout.log=core,before-restart-langbot.stderr.log=core \
             --allowlist tools/log_scan_allowlist.yaml --output "$out"
-          cat "$out/log-anomalies.md" >> "$GITHUB_STEP_SUMMARY"
+          status=$?
+          set -e
+          if [ -f "$out/log-anomalies.md" ]; then
+            cat "$out/log-anomalies.md" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit "$status"
       - name: Upload persistence and Runtime evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -181,6 +186,7 @@ jobs:
             .qa/persistence-runtime/log-anomalies.*
             .qa/persistence-runtime/processes/**/langbot.*.log
             .qa/persistence-runtime/processes/**/before-restart-*.log
+            .qa/persistence-runtime/skill-network-processes/**/langbot.*.log
             .qa/persistence-runtime/artifact-upload-processes/**/langbot.*.log
           if-no-files-found: warn
           retention-days: 30
