@@ -9,7 +9,7 @@
     "STORAGE_DIALECT_IMPORT": 2
   },
   "src/langbot/pkg/agent/runner/run_ledger_store.py": {
-    "LAYER_IMPORT_VIOLATION": 2
+    "LAYER_IMPORT_VIOLATION": 1
   },
   "src/langbot/pkg/api/http/controller/group.py": {
     "LAYER_IMPORT_VIOLATION": 1

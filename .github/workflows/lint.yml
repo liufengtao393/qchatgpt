@@ -54,4 +54,4 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           python scripts/test_check_storage_boundaries.py
-          python scripts/check_storage_boundaries.py
+          python scripts/check_storage_boundaries.py --strict-baseline

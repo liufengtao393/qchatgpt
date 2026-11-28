@@ -195,9 +195,138 @@ class StorageBoundaryRulesTests(unittest.TestCase):
             self.assertEqual(strict.returncode, 1)
             self.assertIn('strict baseline', strict.stdout)
 
+    def test_import_from_counts_module_level_bans_once_and_preserves_per_alias_matches(self):
+        # Single statement importing multiple symbols from write_admission counts once.
+        ledger_src = 'from ...persistence.write_admission import commit_write, write_slot\n'
+        ledger_violations = gate.scan_file('src/langbot/pkg/agent/runner/run_ledger_store.py', ledger_src)
+        self.assertEqual([(v.line, v.rule) for v in ledger_violations], [(1, 'LAYER_IMPORT_VIOLATION')])
+
+        # Controller importing multiple symbols from sqlalchemy counts once;
+        # `from .....persistence import write_admission` still fires both controller and write_admission rules;
+        # `from .....persistence.write_admission import commit_write, write_slot` fires each rule once (2 total, not 4).
+        ctrl_src = dedent("""\
+            from sqlalchemy import select, update, delete
+            from .....persistence import write_admission
+            from .....persistence.write_admission import commit_write, write_slot
+        """)
+        ctrl_violations = gate.scan_file('src/langbot/pkg/api/http/controller/groups/sample.py', ctrl_src)
+        self.assertEqual(
+            [(v.line, v.rule) for v in ctrl_violations],
+            [
+                (1, 'LAYER_IMPORT_VIOLATION'),
+                (2, 'LAYER_IMPORT_VIOLATION'),
+                (2, 'LAYER_IMPORT_VIOLATION'),
+                (3, 'LAYER_IMPORT_VIOLATION'),
+                (3, 'LAYER_IMPORT_VIOLATION'),
+            ],
+        )
+
+        # Storage dialect import counts once for `from sqlalchemy.dialects.sqlite import a, b`
+        # and once per dialect for `from sqlalchemy.dialects import postgresql, sqlite`.
+        dialect_src = dedent("""\
+            from sqlalchemy.dialects.sqlite import dialect, insert
+            from sqlalchemy.dialects import postgresql, sqlite
+        """)
+        dialect_violations = gate.scan_file('src/langbot/pkg/pipeline/sample.py', dialect_src)
+        self.assertEqual(
+            [(v.line, v.rule) for v in dialect_violations],
+            [
+                (1, 'STORAGE_DIALECT_IMPORT'),
+                (2, 'STORAGE_DIALECT_IMPORT'),
+                (2, 'STORAGE_DIALECT_IMPORT'),
+            ],
+        )
+
+        # Persistence upward import counts once for `from ..core import app, stage`
+        # and once per package for `from .. import core, storage`.
+        pers_src = dedent("""\
+            from ..core import app, stage
+            from .. import core, storage
+        """)
+        pers_violations = gate.scan_file('src/langbot/pkg/persistence/sample.py', pers_src)
+        self.assertEqual(
+            [(v.line, v.rule) for v in pers_violations],
+            [
+                (1, 'LAYER_IMPORT_VIOLATION'),
+                (2, 'LAYER_IMPORT_VIOLATION'),
+                (2, 'LAYER_IMPORT_VIOLATION'),
+            ],
+        )
+
+    def test_load_baseline_rejects_bool_zero_and_empty_entries(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / 'src/langbot/pkg/box/clean.py'
+            target.parent.mkdir(parents=True)
+            target.write_text('x = 1\n', encoding='utf-8')
+
+            empty_ok = root / 'empty_ok.json'
+            empty_ok.write_text('{}\n', encoding='utf-8')
+            self.assertEqual(gate.load_baseline(empty_ok), {})
+
+            invalid_payloads = [
+                {'src/langbot/pkg/box/clean.py': {'DIALECT_NAME_BRANCH': True}},
+                {'src/langbot/pkg/box/clean.py': {'DIALECT_NAME_BRANCH': 0}},
+                {'src/langbot/pkg/box/clean.py': {'DIALECT_NAME_BRANCH': -1}},
+                {'src/langbot/pkg/box/clean.py': {}},
+            ]
+            for idx, payload in enumerate(invalid_payloads):
+                bad_file = root / f'bad_{idx}.json'
+                bad_file.write_text(json.dumps(payload), encoding='utf-8')
+                with self.assertRaises(ValueError):
+                    gate.load_baseline(bad_file)
+
+                res = subprocess.run(
+                    [
+                        sys.executable,
+                        str(GATE),
+                        '--root',
+                        str(root),
+                        '--baseline',
+                        str(bad_file),
+                        '--strict-baseline',
+                    ],
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertNotEqual(res.returncode, 0, (payload, res.stdout, res.stderr))
+                self.assertIn('ERROR:', res.stderr)
+
+    def test_default_root_independent_of_cwd_and_missing_src_root_fails(self):
+        # Running from scripts/ without --root still scans the repository root accurately.
+        from_scripts = subprocess.run(
+            [sys.executable, str(GATE), '--strict-baseline'],
+            cwd=str(SCRIPTS_DIR),
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(from_scripts.returncode, 0, (from_scripts.stdout, from_scripts.stderr))
+
+        # A root missing src/langbot must raise FileNotFoundError and exit non-zero via CLI.
+        with TemporaryDirectory() as tmp:
+            empty_root = Path(tmp)
+            with self.assertRaises(FileNotFoundError):
+                gate.scan_repo(empty_root)
+
+            missing = subprocess.run(
+                [sys.executable, str(GATE), '--root', str(empty_root)],
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(missing.returncode, 0, (missing.stdout, missing.stderr))
+            self.assertIn('Source directory does not exist', missing.stderr)
+
     def test_repo_baseline_is_valid_and_synced_with_ruff_per_file_ignores(self):
         res = subprocess.run(
-            [sys.executable, str(GATE), '--root', str(REPO_ROOT), '--baseline', str(BASELINE_FILE)],
+            [
+                sys.executable,
+                str(GATE),
+                '--root',
+                str(REPO_ROOT),
+                '--baseline',
+                str(BASELINE_FILE),
+                '--strict-baseline',
+            ],
             capture_output=True,
             text=True,
         )

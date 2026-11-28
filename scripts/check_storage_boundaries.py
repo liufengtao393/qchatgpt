@@ -31,10 +31,12 @@ from dataclasses import dataclass
 import json
 from pathlib import Path
 import re
+import sys
 import tokenize
 
 
-DEFAULT_BASELINE = Path(__file__).with_name('storage_boundaries_baseline.json')
+DEFAULT_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_BASELINE = Path(__file__).resolve().with_name('storage_boundaries_baseline.json')
 
 PERSISTENCE_PREFIX = 'src/langbot/pkg/persistence/'
 PERSISTENCE_MIGRATIONS_PREFIX = 'src/langbot/pkg/persistence/alembic/versions/'
@@ -138,69 +140,103 @@ def _is_get_db_engine_call(node: ast.AST) -> bool:
     return isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == 'get_db_engine'
 
 
-def _check_import_target(
+def _match_storage_dialect_import(rel_path: str, line: int, target: str) -> Violation | None:
+    if _is_storage_allowed(rel_path):
+        return None
+    for banned, guidance in BANNED_STORAGE_IMPORTS.items():
+        if _matches_prefix(target, banned):
+            return Violation(
+                path=rel_path,
+                line=line,
+                rule='STORAGE_DIALECT_IMPORT',
+                detail=f'forbidden storage/dialect import `{target}`',
+                guidance=guidance,
+            )
+    return None
+
+
+def _match_controller_import(rel_path: str, line: int, target: str) -> Violation | None:
+    if not rel_path.startswith(CONTROLLER_PREFIX):
+        return None
+    for banned, guidance in CONTROLLER_BANNED_IMPORTS.items():
+        if _matches_prefix(target, banned):
+            return Violation(
+                path=rel_path,
+                line=line,
+                rule='LAYER_IMPORT_VIOLATION',
+                detail=f'HTTP controller must not import `{target}`',
+                guidance=guidance,
+            )
+    return None
+
+
+def _match_write_admission_import(rel_path: str, line: int, target: str) -> Violation | None:
+    if rel_path.startswith(PERSISTENCE_PREFIX) or not _matches_prefix(target, WRITE_ADMISSION_MODULE):
+        return None
+    return Violation(
+        path=rel_path,
+        line=line,
+        rule='LAYER_IMPORT_VIOLATION',
+        detail=f'non-persistence module must not import `{target}`',
+        guidance='use unified persistence transaction primitives in langbot.pkg.persistence',
+    )
+
+
+def _match_persistence_upward_import(
     rel_path: str,
     line: int,
     target: str,
     in_type_checking: bool,
+) -> Violation | None:
+    if (
+        not rel_path.startswith(PERSISTENCE_PREFIX)
+        or rel_path.startswith(PERSISTENCE_MIGRATIONS_PREFIX)
+        or in_type_checking
+        or not target.startswith('langbot.pkg.')
+    ):
+        return None
+    top_pkg = target.split('.')[2]
+    if top_pkg in PERSISTENCE_ALLOWED_PKG_DEPS:
+        return None
+    return Violation(
+        path=rel_path,
+        line=line,
+        rule='LAYER_IMPORT_VIOLATION',
+        detail=f'persistence layer runtime import of upper layer `{target}`',
+        guidance='guard type-only references with `if typing.TYPE_CHECKING:` or invert the dependency',
+    )
+
+
+def _check_import_rules(
+    rel_path: str,
+    line: int,
+    module_target: str | None,
+    alias_targets: list[str],
+    in_type_checking: bool,
     violations: list[Violation],
 ) -> None:
-    if not _is_storage_allowed(rel_path):
-        for banned, guidance in BANNED_STORAGE_IMPORTS.items():
-            if _matches_prefix(target, banned):
-                violations.append(
-                    Violation(
-                        path=rel_path,
-                        line=line,
-                        rule='STORAGE_DIALECT_IMPORT',
-                        detail=f'forbidden storage/dialect import `{target}`',
-                        guidance=guidance,
-                    )
-                )
-                break
-
-    if rel_path.startswith(CONTROLLER_PREFIX):
-        for banned, guidance in CONTROLLER_BANNED_IMPORTS.items():
-            if _matches_prefix(target, banned):
-                violations.append(
-                    Violation(
-                        path=rel_path,
-                        line=line,
-                        rule='LAYER_IMPORT_VIOLATION',
-                        detail=f'HTTP controller must not import `{target}`',
-                        guidance=guidance,
-                    )
-                )
-                break
-
-    if not rel_path.startswith(PERSISTENCE_PREFIX) and _matches_prefix(target, WRITE_ADMISSION_MODULE):
-        violations.append(
-            Violation(
-                path=rel_path,
-                line=line,
-                rule='LAYER_IMPORT_VIOLATION',
-                detail=f'non-persistence module must not import `{target}`',
-                guidance='use unified persistence transaction primitives in langbot.pkg.persistence',
-            )
-        )
-
-    if (
-        rel_path.startswith(PERSISTENCE_PREFIX)
-        and not rel_path.startswith(PERSISTENCE_MIGRATIONS_PREFIX)
-        and not in_type_checking
-        and target.startswith('langbot.pkg.')
-    ):
-        top_pkg = target.split('.')[2]
-        if top_pkg not in PERSISTENCE_ALLOWED_PKG_DEPS:
-            violations.append(
-                Violation(
-                    path=rel_path,
-                    line=line,
-                    rule='LAYER_IMPORT_VIOLATION',
-                    detail=f'persistence layer runtime import of upper layer `{target}`',
-                    guidance='guard type-only references with `if typing.TYPE_CHECKING:` or invert the dependency',
-                )
-            )
+    # Evaluate each rule against the module path first so statement-level bans
+    # (e.g., `from sqlalchemy import select, update` or `from ...write_admission import a, b`)
+    # count once per statement instead of multiplying by symbol count. Only rules
+    # that did not match the module fall back to per-alias targets (e.g.,
+    # `from sqlalchemy.dialects import postgresql, sqlite` or
+    # `from .....persistence import write_admission`).
+    rule_matchers = (
+        lambda target: _match_storage_dialect_import(rel_path, line, target),
+        lambda target: _match_controller_import(rel_path, line, target),
+        lambda target: _match_write_admission_import(rel_path, line, target),
+        lambda target: _match_persistence_upward_import(rel_path, line, target, in_type_checking),
+    )
+    for match_rule in rule_matchers:
+        if module_target:
+            hit = match_rule(module_target)
+            if hit is not None:
+                violations.append(hit)
+                continue
+        for target in alias_targets:
+            hit = match_rule(target)
+            if hit is not None:
+                violations.append(hit)
 
 
 class _EngineBypassVisitor(ast.NodeVisitor):
@@ -288,21 +324,13 @@ def scan_file(rel_path: str, source: str) -> list[Violation]:
         in_tc = id(node) in tc_nodes
         if isinstance(node, ast.Import):
             for alias in node.names:
-                _check_import_target(rel_path, node.lineno, alias.name, in_tc, violations)
+                _check_import_rules(rel_path, node.lineno, alias.name, [], in_tc, violations)
         elif isinstance(node, ast.ImportFrom):
             full_mod = _resolve_import_from(rel_path, node)
-            # For statement-level module bans (e.g., controller importing `from sqlalchemy import a, b`),
-            # check the module once when it matches a banned prefix to avoid multiplying counts by symbol count,
-            # while still checking individual aliases for `from sqlalchemy.dialects import postgresql, sqlite`.
-            matched_aliases = False
-            for alias in node.names:
-                target = f'{full_mod}.{alias.name}' if full_mod else alias.name
-                before = len(violations)
-                _check_import_target(rel_path, node.lineno, target, in_tc, violations)
-                if len(violations) > before:
-                    matched_aliases = True
-            if not matched_aliases and full_mod:
-                _check_import_target(rel_path, node.lineno, full_mod, in_tc, violations)
+            alias_targets = [
+                f'{full_mod}.{alias.name}' if full_mod else alias.name for alias in node.names if alias.name != '*'
+            ]
+            _check_import_rules(rel_path, node.lineno, full_mod or None, alias_targets, in_tc, violations)
         elif not storage_allowed and isinstance(node, ast.Attribute):
             if node.attr == 'name' and isinstance(node.value, ast.Attribute) and node.value.attr == 'dialect':
                 violations.append(
@@ -357,8 +385,8 @@ def scan_file(rel_path: str, source: str) -> list[Violation]:
 
 def scan_repo(root: Path) -> list[Violation]:
     src_root = root / 'src' / 'langbot'
-    if not src_root.exists():
-        return []
+    if not src_root.is_dir():
+        raise FileNotFoundError(f'Source directory does not exist: {src_root}')
     violations: list[Violation] = []
     for path in sorted(src_root.rglob('*.py')):
         if path.is_symlink():
@@ -411,22 +439,26 @@ def load_baseline(path: Path) -> dict[str, dict[str, int]]:
         raise ValueError(f'Baseline must be a JSON object: {path}')
     result: dict[str, dict[str, int]] = {}
     for file_path, rules in raw.items():
-        if not isinstance(file_path, str) or not isinstance(rules, dict):
+        if not isinstance(file_path, str) or not file_path or not isinstance(rules, dict) or not rules:
             raise ValueError(f'Invalid baseline entry for {file_path!r}')
         parsed_rules: dict[str, int] = {}
         for rule, count in rules.items():
-            if not isinstance(rule, str) or not isinstance(count, int) or count < 0:
+            if (
+                not isinstance(rule, str)
+                or not rule
+                or isinstance(count, bool)
+                or not isinstance(count, int)
+                or count <= 0
+            ):
                 raise ValueError(f'Invalid baseline count for {file_path}:{rule}')
-            if count > 0:
-                parsed_rules[rule] = count
-        if parsed_rules:
-            result[file_path] = parsed_rules
+            parsed_rules[rule] = count
+        result[file_path] = parsed_rules
     return result
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--root', type=Path, default=Path.cwd(), help='Repository root directory')
+    parser.add_argument('--root', type=Path, default=DEFAULT_ROOT, help='Repository root directory')
     parser.add_argument(
         '--baseline',
         type=Path,
@@ -446,7 +478,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     root = args.root.resolve()
-    violations = scan_repo(root)
+    try:
+        violations = scan_repo(root)
+    except FileNotFoundError as exc:
+        print(f'ERROR: {exc}', file=sys.stderr)
+        return 2
 
     if args.update_baseline:
         data = build_baseline(violations)
@@ -454,7 +490,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f'Updated baseline at {args.baseline} ({len(violations)} tracked legacy violations).')
         return 0
 
-    baseline = load_baseline(args.baseline)
+    try:
+        baseline = load_baseline(args.baseline)
+    except (ValueError, json.JSONDecodeError) as exc:
+        print(f'ERROR: {exc}', file=sys.stderr)
+        return 2
     failures, stale_notices = evaluate(violations, baseline)
 
     if failures:
