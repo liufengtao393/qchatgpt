@@ -118,6 +118,33 @@ class HarnessRouterGroup(group.RouterGroup):
             response.headers['Cache-Control'] = 'no-store'
             return response
 
+        @self.route('/instance', methods=['GET'], auth_type=group.AuthType.NONE)
+        async def instance_metadata():
+            service = self._enrollment_service()
+            if service is None:
+                return self._unavailable()
+            response = self.success(data=service.instance_metadata())
+            response.headers['Cache-Control'] = 'no-store'
+            return response
+
+        @self.route('/bindings/<binding_id>/workspaces', methods=['POST'], auth_type=group.AuthType.NONE)
+        async def authorized_workspaces(binding_id):
+            if self._enrollment_service() is None:
+                return self._unavailable()
+            payload = await quart.request.get_json(silent=True)
+            if not isinstance(payload, dict) or set(payload) - {'device_id', 'username', 'password', 'totp_code'}:
+                return self.http_status(400, 'invalid_authorization_payload', 'Invalid request parameters')
+            try:
+                workspaces = await HarnessOAuthService(self.ap).list_authorized_workspaces(
+                    str(binding_id), payload.get('device_id'), email=payload.get('username'),
+                    password=payload.get('password'), totp_code=payload.get('totp_code'),
+                )
+            except ValueError as exc:
+                return self.http_status(401, str(exc), 'Invalid authentication credentials')
+            response = self.success(data={'workspaces': workspaces})
+            response.headers['Cache-Control'] = 'no-store'
+            return response
+
         def management_service(ctx):
             return self._service() if ctx.principal.principal_type == PrincipalType.ACCOUNT else None
 

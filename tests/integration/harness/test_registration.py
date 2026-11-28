@@ -71,6 +71,41 @@ async def test_cloud_mode_does_not_expose_partial_harness_enrollment(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_instance_metadata_requires_secure_enabled_oss_instance(monkeypatch):
+    monkeypatch.setattr(constants, 'instance_id', 'metadata-instance')
+    ap = SimpleNamespace(
+        deployment=SimpleNamespace(mode='oss'),
+        instance_config=SimpleNamespace(data={
+            'harness': {
+                'enabled': True, 'instance_origin': 'https://instance.example',
+                'client_origin': 'https://harness.example',
+            },
+            'system': {'jwt': {'secret': 'metadata-test-secret'}},
+        }),
+        persistence_mgr=SimpleNamespace(get_db_engine=lambda: object()),
+    )
+    app = Quart(__name__)
+    await HarnessRouterGroup(ap, app).initialize()
+    client = app.test_client()
+
+    assert (await client.get('/api/v1/harness/instance')).status_code == 404
+    response = await client.get('/api/v1/harness/instance', scheme='https')
+    assert response.status_code == 200
+    assert response.headers['Cache-Control'] == 'no-store'
+    assert (await response.get_json())['data'] == {
+        'instance_uuid': 'metadata-instance',
+        'base_url': 'https://instance.example',
+        'protocol': 'HTS1',
+        'enrollment_grant_ttl_seconds': 1800,
+        'capabilities': {
+            'password_authorization': True,
+            'space_authorization': False,
+            'authorized_resource_listing': True,
+        },
+    }
+
+
+@pytest.mark.asyncio
 async def test_instance_binding_is_atomic_and_a_link_cannot_be_redeemed_twice(tmp_path, monkeypatch):
     monkeypatch.setattr(constants, 'instance_id', 'instance-identifier')
     engine = create_async_engine(f'sqlite+aiosqlite:///{tmp_path / "harness.db"}')

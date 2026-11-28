@@ -69,6 +69,29 @@ class HarnessBindings:
         self.jwt_secret = ap.instance_config.data['system']['jwt']['secret']
         self.engine = ap.persistence_mgr.get_db_engine()
 
+    def instance_metadata(self) -> dict:
+        """Return the signed/enrollment identity advertised to a Harness client.
+
+        This deliberately contains only values derived from the running instance
+        and its validated Harness configuration.  It must not be used as an
+        authorization response; callers still need to redeem a grant and obtain
+        an OAuth access token.
+        """
+        return {
+            'instance_uuid': self.instance_uuid,
+            'base_url': self.base_url,
+            'protocol': 'HTS1',
+            'enrollment_grant_ttl_seconds': _LINK_TTL,
+            'capabilities': {
+                'password_authorization': True,
+                # Space-account authorization requires a trusted Space-to-
+                # instance credential exchange, which is not configured by
+                # this self-hosted enrollment protocol.
+                'space_authorization': False,
+                'authorized_resource_listing': True,
+            },
+        }
+
     async def _active_key(self, conn):
         statement = (
             sa.select(_KEY).where(_KEY.c.status == 'active').order_by(_KEY.c.created_at.desc(), _KEY.c.kid).limit(1)

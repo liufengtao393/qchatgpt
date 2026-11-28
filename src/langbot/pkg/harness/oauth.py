@@ -53,6 +53,44 @@ class HarnessOAuthService:
         self.engine = ap.persistence_mgr.get_db_engine()
         self.instance_uuid = constants.instance_id
 
+    async def list_authorized_workspaces(
+        self, binding_id: str, device_id: str, *, email: str, password: str, totp_code: str | None = None
+    ) -> list[dict]:
+        """List only workspaces the signing-in account currently belongs to.
+
+        The device must already be enrolled for this exact pending or active
+        binding. Workspace UUIDs supplied by a client are never treated as
+        authority; password_grant revalidates membership when issuing tokens.
+        """
+        if not all(isinstance(value, str) and value for value in (email, password)):
+            raise ValueError('invalid_grant')
+        async with self.engine.connect() as conn:
+            device = (await conn.execute(
+                sa.select(HarnessDevice.account_uuid).where(
+                    HarnessDevice.id == device_id,
+                    HarnessDevice.binding_id == binding_id,
+                    HarnessDevice.revoked_at.is_(None),
+                    sa.exists(sa.select(HarnessRegistrationLink.id).where(
+                        HarnessRegistrationLink.id == HarnessDevice.binding_id,
+                        HarnessRegistrationLink.instance_uuid == self.instance_uuid,
+                        HarnessRegistrationLink.consumed_at.is_not(None),
+                        HarnessRegistrationLink.revoked_at.is_(None),
+                    )),
+                )
+            )).one_or_none()
+        if device is None:
+            raise ValueError('invalid_device')
+        account = await self.ap.user_service.get_user_by_email(email)
+        try:
+            await self.ap.user_service.authenticate(email, password, totp_code)
+        except Exception as exc:
+            raise ValueError('invalid_grant') from exc
+        if account is None or (device[0] is not None and device[0] != account.uuid):
+            raise ValueError('invalid_grant')
+        accesses = await self.ap.workspace_collaboration_service.list_account_workspaces(account.uuid)
+        return [{'uuid': access.workspace.uuid, 'name': access.workspace.name, 'role': access.membership.role}
+                for access in accesses]
+
     async def register_device(self, binding_id: str, enrollment_token: str, payload: dict) -> dict:
         required = ('device_kid', 'x25519_pub', 'ed25519_pub')
         if not isinstance(payload, dict) or any(not isinstance(payload.get(k), str) for k in required):
